@@ -1,0 +1,19 @@
+# ===== 构建产物 =====
+bin/
+obj/
+build-fake/
+Testing/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# ===== 本地配置 =====
+config.json
+*.log
+
+# ===== IDE =====
+.vs/
+*.user

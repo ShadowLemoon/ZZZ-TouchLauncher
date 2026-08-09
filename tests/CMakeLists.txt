@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(FakeGame LANGUAGES CXX)
+add_executable(fake_game fake_game.cpp)
+target_compile_features(fake_game PRIVATE cxx_std_20)
+target_compile_definitions(fake_game PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+if(MSVC)
+    target_compile_options(fake_game PRIVATE /W4 /utf-8)
+endif()

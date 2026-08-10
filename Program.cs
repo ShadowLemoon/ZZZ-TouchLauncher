@@ -37,6 +37,32 @@ namespace ZZZTouchLauncher
         [DllImport("ZZZTouchCore.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern void ZZZTouchRelease();
 
+        // user32：用于等待游戏主窗口客户区就绪（>0）后再写回 PC。
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+            public int Width { get { return Right - Left; } }
+            public int Height { get { return Bottom - Top; } }
+        }
+
         private static string ConfigPath
         {
             get
@@ -96,6 +122,37 @@ namespace ZZZTouchLauncher
                     $"警告：检测到 {processes.Length} 个游戏进程，仅处理第一个（多开场景不完整支持）。");
             }
             return processes.Length > 0 ? processes[0] : null;
+        }
+
+        // 等待游戏主窗口客户区就绪（宽高均 > 0）。
+        // 游戏初次读取 GENERAL_DATA.bin 发生在客户区真正显示之后，
+        // 写回 PC 必须等到这一刻之后，否则游戏会读到 PC 配置、触屏不生效。
+        private static bool WaitForClientArea(uint pid, int timeoutMs)
+        {
+            int deadline = Environment.TickCount + timeoutMs;
+            while (Environment.TickCount < deadline)
+            {
+                IntPtr hwnd = IntPtr.Zero;
+                EnumWindows(delegate (IntPtr h, IntPtr l)
+                {
+                    GetWindowThreadProcessId(h, out uint windowPid);
+                    if (windowPid == pid && IsWindowVisible(h))
+                    {
+                        hwnd = h;
+                        return false; // 停止枚举
+                    }
+                    return true;
+                }, IntPtr.Zero);
+
+                if (hwnd != IntPtr.Zero &&
+                    GetClientRect(hwnd, out RECT rect) &&
+                    rect.Width > 0 && rect.Height > 0)
+                {
+                    return true;
+                }
+                System.Threading.Thread.Sleep(500);
+            }
+            return false;
         }
 
         // 轮询等待用户启动游戏进程，记录其可执行文件所在目录到 config.json。
@@ -174,8 +231,7 @@ namespace ZZZTouchLauncher
 
         private static int InjectAndWait(Process game, bool quiet, string branch)
         {
-            Console.WriteLine($"[{branch}] 注入纯合成器（无日志）...");
-            int result = ZZZTouchInjectToProcess(
+            Console.WriteLine($"[{branch}] 注入纯合成器（{(quiet ? "无日志" : "日志开启")}）...");            int result = ZZZTouchInjectToProcess(
                 (uint)game.Id,
                 quiet,
                 30000);
@@ -265,7 +321,9 @@ namespace ZZZTouchLauncher
                 return InjectAndWait(running, true, "接管");
             }
 
-            // 启动分支：确保触屏 → 启动 → 注入 → 写回PC → 游戏退出后确保PC。
+            // 启动分支：确保触屏 → 启动 → 注入 → 等待窗口客户区就绪 → 写回PC → 游戏退出后确保PC。
+            // 游戏初次读取 GENERAL_DATA.bin 发生在主窗口客户区真正显示之后，
+            // 因此写回 PC 必须等到客户区 > 0，否则游戏读到 PC 配置、触屏不生效。
             Console.WriteLine("确保触屏模式...");
             try
             {
@@ -334,7 +392,36 @@ namespace ZZZTouchLauncher
                 // 重跑启动器会走「已运行+触屏」接管分支重试注入。
                 return 1;
             }
-            Console.WriteLine("注入成功，写回 PC 模式（游戏内存已是触屏）...");
+
+            Console.WriteLine("注入成功。等待游戏窗口客户区就绪...");
+            if (!WaitForClientArea(targetPid, 120000))
+            {
+                Console.WriteLine("等待窗口客户区超时，保持触屏配置，不写回 PC。");
+                Console.WriteLine("监视游戏进程...");
+                int waitTimeout = ZZZTouchWaitGameExit(uint.MaxValue);
+                if (waitTimeout != 0)
+                {
+                    Console.WriteLine($"等待游戏退出失败（{waitTimeout}）");
+                }
+                else
+                {
+                    Console.WriteLine("游戏已退出，确保 PC 模式...");
+                    try
+                    {
+                        WritePlatform(dataPath, PlatformPc);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("确保 PC 配置失败：" + ex.Message);
+                    }
+                }
+                ZZZTouchRelease();
+                Console.WriteLine("启动器退出。");
+                return 0;
+            }
+            // 客户区就绪后再等 5 秒，确保游戏已完成初次配置读取，再写回 PC。
+            Console.WriteLine("窗口客户区就绪，延迟 5 秒后写回 PC 模式（游戏内存已是触屏）...");
+            System.Threading.Thread.Sleep(5000);
             try
             {
                 WritePlatform(dataPath, PlatformPc);

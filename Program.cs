@@ -9,6 +9,7 @@ namespace ZZZTouchLauncher
 {
     // 生命周期状态机：
     //   启动器运行
+    //   ├─ 首次记录路径 → 立即确保触屏(1) → 注入当前游戏 → 写回PC(2) → 常驻
     //   ├─ 游戏已运行？ → 读配置
     //   │   ├─ 触屏(1) → 注入接管 → 不碰配置 → 游戏退出 → 退出
     //   │   └─ 非触屏(2) → 打印原因退出（不动配置）
@@ -263,6 +264,7 @@ namespace ZZZTouchLauncher
             // 游戏路径：仅来自 config.json；缺失或失效时回退到
             // 等待用户启动一次游戏、记录路径的自愈流程。
             string gamePath = ReadGamePathFromConfig();
+            bool recordedGamePath = false;
 
             string dataPath = null;
             string exePath = null;
@@ -277,6 +279,7 @@ namespace ZZZTouchLauncher
                     {
                         return 1;
                     }
+                    recordedGamePath = true;
                 }
 
                 dataPath = GeneralDataPath(gamePath);
@@ -291,13 +294,14 @@ namespace ZZZTouchLauncher
                     {
                         return 1;
                     }
+                    recordedGamePath = true;
                     continue;
                 }
                 break;
             }
 
             Process running = FindRunningGame();
-            if (running != null)
+            if (running != null && !recordedGamePath)
             {
                 // 接管分支：不碰配置。
                 int platform;
@@ -321,7 +325,8 @@ namespace ZZZTouchLauncher
                 return InjectAndWait(running, true, "接管");
             }
 
-            // 启动分支：确保触屏 → 启动 → 注入 → 等待窗口客户区就绪 → 写回PC → 游戏退出后确保PC。
+            // 启动分支或首次路径自愈分支：确保触屏 → 启动/接管 → 注入 →
+            // 等待窗口客户区就绪 → 写回PC → 游戏退出后确保PC。
             // 游戏初次读取 GENERAL_DATA.bin 发生在主窗口客户区真正显示之后，
             // 因此写回 PC 必须等到客户区 > 0，否则游戏读到 PC 配置、触屏不生效。
             Console.WriteLine("确保触屏模式...");
@@ -335,39 +340,45 @@ namespace ZZZTouchLauncher
                 return 1;
             }
 
-            Console.WriteLine("启动游戏...");
-            Process started;
-            try
-            {
-                started = Process.Start(exePath);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("游戏启动失败：" + ex.Message);
-                // 启动失败：文件未进入触屏读取路径，恢复 PC 保持干净状态。
-                try
-                {
-                    WritePlatform(dataPath, PlatformPc);
-                }
-                catch
-                {
-                }
-                return 1;
-            }
+            Process started = running;
             if (started == null)
             {
-                Console.WriteLine("游戏启动失败");
+                Console.WriteLine("启动游戏...");
                 try
                 {
-                    WritePlatform(dataPath, PlatformPc);
+                    started = Process.Start(exePath);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Console.WriteLine("游戏启动失败：" + ex.Message);
+                    // 启动失败：文件未进入触屏读取路径，恢复 PC 保持干净状态。
+                    try
+                    {
+                        WritePlatform(dataPath, PlatformPc);
+                    }
+                    catch
+                    {
+                    }
+                    return 1;
                 }
-                return 1;
+                if (started == null)
+                {
+                    Console.WriteLine("游戏启动失败");
+                    try
+                    {
+                        WritePlatform(dataPath, PlatformPc);
+                    }
+                    catch
+                    {
+                    }
+                    return 1;
+                }
+                Console.WriteLine($"游戏进程已启动（PID={started.Id}），等待主窗口并注入...");
             }
-
-            Console.WriteLine($"游戏进程已启动（PID={started.Id}），等待主窗口并注入...");
+            else
+            {
+                Console.WriteLine($"已获取游戏路径并更新触屏配置（PID={started.Id}），等待主窗口并注入...");
+            }
             uint targetPid = (uint)started.Id;
             int injectResult = ZZZTouchInjectToProcess(targetPid, true, 60000);
             if (injectResult == 1)

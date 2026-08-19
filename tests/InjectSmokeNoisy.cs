@@ -1,5 +1,5 @@
 // 对照组：非 quiet 模式注入假游戏进程。
-// 预期：返回 8（InstallFailed），且会创建 ZZZTouchFilter-<pid>.log。
+// 预期：返回 8（InstallFailed），且会创建 ZZZTouchRuntime-<pid>.log。
 using System;
 using System.Runtime.InteropServices;
 

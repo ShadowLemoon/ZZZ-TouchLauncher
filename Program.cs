@@ -249,7 +249,7 @@ namespace ZZZTouchLauncher
             {
                 case 0: return "成功";
                 case 1: return "未找到游戏主窗口";
-                case 2: return "加载 ZZZTouchFilterHook.dll 失败";
+                case 2: return "加载 ZZZTouchRuntime.dll 失败";
                 case 3: return "获取合成器导出入口失败";
                 case 4: return "打开游戏进程句柄失败（请以管理员权限运行）";
                 case 5: return "已有另一个注入控制器占用（互斥锁）";

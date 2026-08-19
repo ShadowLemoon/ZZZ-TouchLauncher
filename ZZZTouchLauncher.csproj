@@ -44,8 +44,4 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-  <PropertyGroup>
-    <PostBuildEvent>copy /Y "$(ProjectDir)..\ZZZ-TouchHook\build\Release\ZZZTouchCore.dll" "$(TargetDir)ZZZTouchCore.dll" &gt;nul
-copy /Y "$(ProjectDir)..\ZZZ-TouchHook\build\Release\ZZZTouchFilterHook.dll" "$(TargetDir)ZZZTouchFilterHook.dll" &gt;nul</PostBuildEvent>
-  </PropertyGroup>
 </Project>

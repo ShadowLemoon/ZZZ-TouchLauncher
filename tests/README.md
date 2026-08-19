@@ -6,8 +6,8 @@
 
 ## 前置条件
 
-- `ZZZTouchCore.dll`、`ZZZTouchFilterHook.dll` 已构建（`ZZZ-TouchHook/build/Release/`）
-- 本目录下放置这三个 DLL（复制 `ZZZTouchLauncher/bin/Release/` 下的即可）
+- 下载 `ZZZ-TouchRuntime` 的配套 Release 包
+- 将其中的 `ZZZTouchCore.dll`、`ZZZTouchRuntime.dll` 放到本目录
 
 `--restore-pc` 测试不依赖 Hook DLL 或真实游戏，可单独运行：
 
@@ -49,11 +49,11 @@ cmake --build build-fake --config Release
 # 预期：InjectResult=8（InstallFailed），退出码 0
 ```
 
-quiet 验证：注入后**不应**生成 `ZZZTouchFilter-<pid>.log`。
+quiet 验证：注入后**不应**生成 `ZZZTouchRuntime-<pid>.log`。
 
 ## 3. 非 quiet 对照（InjectSmokeNoisy.cs）
 
-同样的注入但 `quiet=0`，**应**生成 `ZZZTouchFilter-<pid>.log`（有内容）。
+同样的注入但 `quiet=0`，**应**生成 `ZZZTouchRuntime-<pid>.log`（有内容）。
 用于证明 quiet 开关精确控制日志输出。
 
 ## 4. 启动器三分支模拟

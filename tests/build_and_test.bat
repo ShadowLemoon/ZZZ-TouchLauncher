@@ -2,7 +2,7 @@
 rem ============================================================
 rem ZZZTouchLauncher 离线回归测试（一键运行）
 rem 不启动真实游戏，全部由假进程（fake_game）驱动。
-rem 前置：已构建 ZZZ-TouchHook（build/Release 下三个 DLL）
+rem 前置：本目录已有 ZZZ-TouchRuntime Release 包中的两个 DLL
 rem 用法：build_and_test.bat
 rem ============================================================
 setlocal
@@ -10,15 +10,12 @@ cd /d "%~dp0"
 
 set "CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 set "CMAKE=C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-set "HOOK_BUILD=..\..\ZZZ-TouchHook\build\Release"
 set "PASS=0"
 set "FAIL=0"
 
-echo [1/5] 准备 DLL ...
-if not exist ZZZTouchCore.dll copy /Y "%HOOK_BUILD%\ZZZTouchCore.dll" . >nul
-if not exist ZZZTouchFilterHook.dll copy /Y "%HOOK_BUILD%\ZZZTouchFilterHook.dll" . >nul
+echo [1/5] 检查 Runtime DLL ...
 if not exist ZZZTouchCore.dll (echo FAIL: ZZZTouchCore.dll 缺失 & goto :end)
-if not exist ZZZTouchFilterHook.dll (echo FAIL: ZZZTouchFilterHook.dll 缺失 & goto :end)
+if not exist ZZZTouchRuntime.dll (echo FAIL: ZZZTouchRuntime.dll 缺失 & goto :end)
 echo      OK
 
 echo [2/5] 编译 P/Invoke 冒烟 ...
@@ -56,7 +53,7 @@ if "%PID%"=="" (echo FAIL: fake_game 未启动 & goto :end)
 
 InjectSmoke.exe %PID% >nul
 if errorlevel 1 (echo FAIL: quiet 注入返回码 != 8 & goto :cleanup)
-if exist ZZZTouchFilter-%PID%.log (echo FAIL: quiet 模式生成了日志 & goto :cleanup)
+if exist ZZZTouchRuntime-%PID%.log (echo FAIL: quiet 模式生成了日志 & goto :cleanup)
 echo      OK (quiet: 返回8 + 无日志)
 taskkill /F /IM fake_game.exe >nul 2>&1
 timeout /t 1 /nobreak >nul
@@ -69,12 +66,12 @@ if "%PID%"=="" (echo FAIL: fake_game 未启动(noisy) & goto :end)
 
 InjectSmokeNoisy.exe %PID% >nul
 if errorlevel 1 (echo FAIL: 非 quiet 注入返回码 != 8 & goto :cleanup)
-if not exist ZZZTouchFilter-%PID%.log (echo FAIL: 非 quiet 模式未生成日志 & goto :cleanup)
+if not exist ZZZTouchRuntime-%PID%.log (echo FAIL: 非 quiet 模式未生成日志 & goto :cleanup)
 echo      OK (noisy: 返回8 + 生成日志)
 
 :cleanup
 taskkill /F /IM fake_game.exe >nul 2>&1
-del /Q ZZZTouchFilter-%PID%.log >nul 2>&1
+del /Q ZZZTouchRuntime-%PID%.log >nul 2>&1
 
 echo.
 echo ============================================================

@@ -36,8 +36,6 @@ namespace ZZZTouchLauncher
             46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 101, 209, 129, 116
         };
 
-        // ZZZTouchCore.dll 导出（C++，__cdecl）。
-        // Core/HHOOK 的所有权始终留在 --session 进程，不交给短生命周期启动入口。
         [DllImport("ZZZTouchCore.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int ZZZTouchInjectToProcess(
             uint pid, [MarshalAs(UnmanagedType.Bool)] bool quiet, uint windowWaitMs);
@@ -479,7 +477,13 @@ namespace ZZZTouchLauncher
                 Console.WriteLine("启动游戏...");
                 try
                 {
-                    started = Process.Start(exePath);
+                    var gameStartInfo = new ProcessStartInfo
+                    {
+                        FileName = exePath,
+                        WorkingDirectory = gamePath,
+                        UseShellExecute = false,
+                    };
+                    started = Process.Start(gameStartInfo);
                 }
                 catch (Exception ex)
                 {

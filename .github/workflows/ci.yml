@@ -9,6 +9,13 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      RUNTIME_VERSION: v1.0.0
+      RUNTIME_ASSET: ZZZTouchRuntime-v1.0.0-win-x64.zip
+      RUNTIME_ARCHIVE_SHA256: e8fba7e8b237ecd9806a225bdaced97cc0f1eb8ae22b344ae0d3f47439e4f1c2
+      CORE_DLL_SHA256: f85c4cd14dccad0fb8411709bdd98098e7f593e9ccbafb378c65c883402f3feb
+      RUNTIME_DLL_SHA256: cd5aeb4bbfe4cf28f22d265e0aa3df58dcc7551b92f4a7c65b13829cf0b75fcc
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -21,3 +28,79 @@ jobs:
 
       - name: Test legacy config restore
         run: tests\test_restore_pc.bat
+
+      - name: Download and verify Runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $runtimeArchive = Join-Path $env:RUNNER_TEMP $env:RUNTIME_ASSET
+          $runtimeDirectory = Join-Path $env:RUNNER_TEMP 'ZZZTouchRuntime'
+          $runtimeUrl = "https://github.com/ShadowLemoon/ZZZ-TouchRuntime/releases/download/$env:RUNTIME_VERSION/$env:RUNTIME_ASSET"
+
+          Invoke-WebRequest -Uri $runtimeUrl -OutFile $runtimeArchive
+
+          $archiveHash = (Get-FileHash -Algorithm SHA256 $runtimeArchive).Hash.ToLowerInvariant()
+          if ($archiveHash -ne $env:RUNTIME_ARCHIVE_SHA256) {
+            throw "Runtime archive SHA-256 mismatch: $archiveHash"
+          }
+
+          New-Item -ItemType Directory -Path $runtimeDirectory | Out-Null
+          Expand-Archive -Path $runtimeArchive -DestinationPath $runtimeDirectory
+
+          $relativeFiles = @(
+            Get-ChildItem -Path $runtimeDirectory -Recurse -File |
+              ForEach-Object {
+                [System.IO.Path]::GetRelativePath($runtimeDirectory, $_.FullName).Replace('\\', '/')
+              } |
+              Sort-Object
+          )
+          $expectedFiles = @('ZZZTouchCore.dll', 'ZZZTouchRuntime.dll')
+          if (($relativeFiles -join '|') -ne ($expectedFiles -join '|')) {
+            throw "Unexpected Runtime archive contents: $($relativeFiles -join ', ')"
+          }
+
+          $coreDll = Join-Path $runtimeDirectory 'ZZZTouchCore.dll'
+          $runtimeDll = Join-Path $runtimeDirectory 'ZZZTouchRuntime.dll'
+          $coreHash = (Get-FileHash -Algorithm SHA256 $coreDll).Hash.ToLowerInvariant()
+          $runtimeHash = (Get-FileHash -Algorithm SHA256 $runtimeDll).Hash.ToLowerInvariant()
+          if ($coreHash -ne $env:CORE_DLL_SHA256) {
+            throw "ZZZTouchCore.dll SHA-256 mismatch: $coreHash"
+          }
+          if ($runtimeHash -ne $env:RUNTIME_DLL_SHA256) {
+            throw "ZZZTouchRuntime.dll SHA-256 mismatch: $runtimeHash"
+          }
+
+          "RUNTIME_DIRECTORY=$runtimeDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Stage test package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $stageDirectory = Join-Path $env:RUNNER_TEMP 'ZZZTouchLauncher-test'
+          New-Item -ItemType Directory -Path $stageDirectory | Out-Null
+
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'bin/Release/ZZZTouchLauncher.exe') $stageDirectory
+          Copy-Item (Join-Path $env:RUNTIME_DIRECTORY 'ZZZTouchCore.dll') $stageDirectory
+          Copy-Item (Join-Path $env:RUNTIME_DIRECTORY 'ZZZTouchRuntime.dll') $stageDirectory
+
+          $packageFiles = @(
+            Get-ChildItem -Path $stageDirectory -File |
+              Select-Object -ExpandProperty Name |
+              Sort-Object
+          )
+          $expectedFiles = @('ZZZTouchCore.dll', 'ZZZTouchLauncher.exe', 'ZZZTouchRuntime.dll')
+          if (($packageFiles -join '|') -ne ($expectedFiles -join '|')) {
+            throw "Unexpected test package contents: $($packageFiles -join ', ')"
+          }
+
+          "TEST_PACKAGE_DIRECTORY=$stageDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZZZTouchLauncher-PR-${{ github.event.pull_request.number }}-win-x64
+          path: ${{ env.TEST_PACKAGE_DIRECTORY }}
+          if-no-files-found: error
+          retention-days: 14

@@ -4,31 +4,40 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace ZZZTouchLauncher
 {
     // 生命周期状态机：
-    //   启动器运行
-    //   ├─ --restore-pc → 将配置恢复为PC(2) → 退出
-    //   ├─ 首次记录路径 → 立即确保触屏(1) → 注入当前游戏 → 写回PC(2) → 常驻
+    //   默认启动入口
+    //   └─ 启动同一 EXE 的 --session 子进程 → 等 Runtime 注入成功 → 入口退出
+    //
+    //   --session（内部模式，和游戏同生命周期）
+    //   ├─ 首次记录路径 → 确保触屏(1) → 注入 → 通知父入口 → 写回PC(2) → 常驻
     //   ├─ 游戏已运行？ → 读配置
-    //   │   ├─ 触屏(1) → 注入接管 → 不碰配置 → 游戏退出 → 退出
-    //   │   └─ 非触屏(2) → 打印原因退出（不动配置）
-    //   └─ 未运行 → 确保触屏(1) → 启动游戏 → 注入 → 写回PC(2) → 常驻
+    //   │   ├─ 触屏(1) → 注入接管 → 通知父入口 → 游戏退出 → 确保PC(2) → 退出
+    //   │   └─ 非触屏(2) → 无需接管 → 退出
+    //   └─ 未运行 → 确保触屏(1) → 启动游戏 → 注入 → 通知父入口 → 写回PC(2) → 常驻
     //       └─ 游戏退出 → 确保PC(2) → 退出
+    //
+    //   --restore-pc
+    //   └─ Sunshine Undo / 手工恢复：将磁盘配置恢复为PC(2) → 退出
     internal static class Program
     {
         private const string GameExecutableName = "ZenlessZoneZero.exe";
+        private const string InternalSessionArgument = "--session";
+        private const string SessionReadyEventPrefix = "Local\\ZZZTouchLauncherSessionReady-";
         private const int PlatformTouch = 1;
         private const int PlatformPc = 2;
 
         private static readonly byte[] Magic = new byte[]
         {
             85, 110, 209, 150, 116, 209, 131, 206, 149, 110, 103, 105, 110, 208, 181,
-            46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 101, 209, 129, 116
+            46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 209, 129, 116
         };
 
         // ZZZTouchCore.dll 导出（C++，__cdecl）。
+        // Core/HHOOK 的所有权始终留在 --session 进程，不交给短生命周期启动入口。
         [DllImport("ZZZTouchCore.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int ZZZTouchInjectToProcess(
             uint pid, [MarshalAs(UnmanagedType.Bool)] bool quiet, uint windowWaitMs);
@@ -141,7 +150,7 @@ namespace ZZZTouchLauncher
                     if (windowPid == pid && IsWindowVisible(h))
                     {
                         hwnd = h;
-                        return false; // 停止枚举
+                        return false;
                     }
                     return true;
                 }, IntPtr.Zero);
@@ -152,21 +161,21 @@ namespace ZZZTouchLauncher
                 {
                     return true;
                 }
-                System.Threading.Thread.Sleep(500);
+                Thread.Sleep(500);
             }
             return false;
         }
 
         // 轮询等待用户启动游戏进程，记录其可执行文件所在目录到 config.json。
-        // 返回游戏路径；失败返回 null。
         private static string WaitForGameAndRecordPath()
         {
             Process observed = null;
             while (observed == null)
             {
-                System.Threading.Thread.Sleep(1000);
+                Thread.Sleep(1000);
                 observed = FindRunningGame();
             }
+
             string gamePath;
             try
             {
@@ -177,6 +186,7 @@ namespace ZZZTouchLauncher
                 Console.WriteLine("无法获取游戏进程路径：" + ex.Message);
                 return null;
             }
+
             WriteGamePathToConfig(gamePath);
             Console.WriteLine($"已记录游戏路径：{gamePath}");
             return gamePath;
@@ -213,6 +223,20 @@ namespace ZZZTouchLauncher
             Sleepy.WriteString(dataPath, raw, Magic);
         }
 
+        private static bool TryWritePc(string dataPath, string failurePrefix)
+        {
+            try
+            {
+                WritePlatform(dataPath, PlatformPc);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(failurePrefix + ex.Message);
+                return false;
+            }
+        }
+
         private static int RestorePcConfiguration()
         {
             string gamePath = ReadGamePathFromConfig();
@@ -229,13 +253,8 @@ namespace ZZZTouchLauncher
                 return 1;
             }
 
-            try
+            if (!TryWritePc(dataPath, "恢复 PC 配置失败："))
             {
-                WritePlatform(dataPath, PlatformPc);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("恢复 PC 配置失败：" + ex.Message);
                 return 1;
             }
 
@@ -257,13 +276,103 @@ namespace ZZZTouchLauncher
                 case 7: return "安装 WH_GETMESSAGE Hook 失败";
                 case 8: return "合成器安装失败（详见游戏侧行为）";
                 case 9: return "游戏在安装确认前退出";
+                case 10: return "等待 Runtime 安装结果失败";
                 default: return "未知错误(" + result + ")";
             }
         }
 
-        private static int InjectAndWait(Process game, bool quiet, string branch)
+        // 短生命周期入口。子进程使用普通 Process.Start 创建，因此在 Sunshine
+        // 的 Windows Job/process group 中自然继承，不做 detached/breakaway。
+        // wait-all=true 时主入口退出不会结束会话，Sunshine 会继续跟踪 session/game。
+        private static int StartSessionController()
         {
-            Console.WriteLine($"[{branch}] 注入纯合成器（{(quiet ? "无日志" : "日志开启")}）...");            int result = ZZZTouchInjectToProcess(
+            string token = Guid.NewGuid().ToString("N");
+            string eventName = SessionReadyEventPrefix + token;
+
+            using (var readyEvent = new EventWaitHandle(
+                false,
+                EventResetMode.ManualReset,
+                eventName))
+            {
+                string launcherPath;
+                try
+                {
+                    using (Process current = Process.GetCurrentProcess())
+                    {
+                        launcherPath = current.MainModule.FileName;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("无法定位启动器自身路径：" + ex.Message);
+                    return 1;
+                }
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = launcherPath,
+                    Arguments = InternalSessionArgument + " " + token,
+                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+                    UseShellExecute = false,
+                };
+
+                Process session;
+                try
+                {
+                    session = Process.Start(startInfo);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("启动会话控制器失败：" + ex.Message);
+                    return 1;
+                }
+
+                if (session == null)
+                {
+                    Console.WriteLine("启动会话控制器失败。");
+                    return 1;
+                }
+
+                using (session)
+                {
+                    Console.WriteLine($"会话控制器已启动（PID={session.Id}），等待 Runtime 就绪...");
+                    while (true)
+                    {
+                        // 真正的注入成功由 --session 在 ZZZTouchInjectToProcess 返回 0 后置位。
+                        // 父入口只等这个一次性握手，不持有 Core/HHOOK。
+                        if (readyEvent.WaitOne(100))
+                        {
+                            Console.WriteLine("Runtime 已就绪，会话由控制器继续持有；启动入口退出。");
+                            return 0;
+                        }
+
+                        if (session.HasExited)
+                        {
+                            int exitCode = session.ExitCode;
+                            if (exitCode == 0)
+                            {
+                                Console.WriteLine("会话控制器无需建立运行时会话；启动入口退出。");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"会话控制器在 Runtime 就绪前退出（代码 {exitCode}）。");
+                            }
+                            return exitCode;
+                        }
+                    }
+                }
+            }
+        }
+
+        private static int InjectAndWait(
+            Process game,
+            bool quiet,
+            string branch,
+            string dataPath,
+            Action notifyRuntimeReady)
+        {
+            Console.WriteLine($"[{branch}] 注入纯合成器（{(quiet ? "无日志" : "日志开启")}）...");
+            int result = ZZZTouchInjectToProcess(
                 (uint)game.Id,
                 quiet,
                 30000);
@@ -273,7 +382,11 @@ namespace ZZZTouchLauncher
                 ZZZTouchRelease();
                 return 1;
             }
-            Console.WriteLine($"[{branch}] 注入成功，监视游戏进程...");
+
+            Console.WriteLine($"[{branch}] 注入成功，Runtime 已就绪。");
+            notifyRuntimeReady();
+
+            Console.WriteLine($"[{branch}] 监视游戏进程...");
             int wait = ZZZTouchWaitGameExit(uint.MaxValue);
             if (wait != 0)
             {
@@ -281,27 +394,17 @@ namespace ZZZTouchLauncher
             }
             else
             {
-                Console.WriteLine($"[{branch}] 游戏已退出");
+                Console.WriteLine($"[{branch}] 游戏已退出，确保 PC 模式...");
+                TryWritePc(dataPath, "确保 PC 配置失败：");
             }
+
             ZZZTouchRelease();
             return 0;
         }
 
-        private static int Main(string[] args)
+        private static int RunSession(Action notifyRuntimeReady)
         {
-            Console.OutputEncoding = Encoding.UTF8;
-            Console.WriteLine("=== ZZZTouchLauncher ===");
-
-            if (args.Length > 0)
-            {
-                if (args.Length == 1 && args[0] == "--restore-pc")
-                {
-                    return RestorePcConfiguration();
-                }
-
-                Console.WriteLine("用法：ZZZTouchLauncher.exe [--restore-pc]");
-                return 2;
-            }
+            Console.WriteLine("=== ZZZTouchLauncher Session ===");
 
             // 游戏路径：仅来自 config.json；缺失或失效时回退到
             // 等待用户启动一次游戏、记录路径的自愈流程。
@@ -345,7 +448,6 @@ namespace ZZZTouchLauncher
             Process running = FindRunningGame();
             if (running != null && !recordedGamePath)
             {
-                // 接管分支：不碰配置。
                 int platform;
                 try
                 {
@@ -356,21 +458,26 @@ namespace ZZZTouchLauncher
                     Console.WriteLine("读取配置失败：" + ex.Message);
                     return 1;
                 }
+
                 if (platform != PlatformTouch)
                 {
                     Console.WriteLine(
                         $"游戏已启动且配置为 PC 模式（LocalUILayoutPlatform={platform}）。");
-                    Console.WriteLine("不注入、不修改配置，启动器退出。");
+                    Console.WriteLine("不注入、不修改配置，会话控制器退出。");
                     return 0;
                 }
+
                 Console.WriteLine("游戏已启动且为触屏模式，注入接管...");
-                return InjectAndWait(running, true, "接管");
+                return InjectAndWait(
+                    running,
+                    true,
+                    "接管",
+                    dataPath,
+                    notifyRuntimeReady);
             }
 
             // 启动分支或首次路径自愈分支：确保触屏 → 启动/接管 → 注入 →
-            // 等待窗口客户区就绪 → 写回PC → 游戏退出后确保PC。
-            // 游戏初次读取 GENERAL_DATA.bin 发生在主窗口客户区真正显示之后，
-            // 因此写回 PC 必须等到客户区 > 0，否则游戏读到 PC 配置、触屏不生效。
+            // 通知短生命周期父入口 → 等待客户区就绪 → 写回PC → 常驻到游戏退出。
             Console.WriteLine("确保触屏模式...");
             try
             {
@@ -393,26 +500,14 @@ namespace ZZZTouchLauncher
                 catch (Exception ex)
                 {
                     Console.WriteLine("游戏启动失败：" + ex.Message);
-                    // 启动失败：文件未进入触屏读取路径，恢复 PC 保持干净状态。
-                    try
-                    {
-                        WritePlatform(dataPath, PlatformPc);
-                    }
-                    catch
-                    {
-                    }
+                    TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
                 }
+
                 if (started == null)
                 {
                     Console.WriteLine("游戏启动失败");
-                    try
-                    {
-                        WritePlatform(dataPath, PlatformPc);
-                    }
-                    catch
-                    {
-                    }
+                    TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
                 }
                 Console.WriteLine($"游戏进程已启动（PID={started.Id}），等待主窗口并注入...");
@@ -421,14 +516,15 @@ namespace ZZZTouchLauncher
             {
                 Console.WriteLine($"已获取游戏路径并更新触屏配置（PID={started.Id}），等待主窗口并注入...");
             }
+
             uint targetPid = (uint)started.Id;
             int injectResult = ZZZTouchInjectToProcess(targetPid, true, 60000);
             if (injectResult == 1)
             {
                 // 仅冷启动窗口出现慢或启动器进程链变化时重试；
-                // 其他失败（安装失败/会话残留等）重试只会得到误导性的错误码。
+                // 其他失败重试只会得到误导性的错误码。
                 Console.WriteLine("主窗口未找到，重新定位游戏进程重试...");
-                System.Threading.Thread.Sleep(5000);
+                Thread.Sleep(5000);
                 Process latest = FindRunningGame();
                 if (latest != null && (uint)latest.Id != targetPid)
                 {
@@ -437,16 +533,20 @@ namespace ZZZTouchLauncher
                 }
                 injectResult = ZZZTouchInjectToProcess(targetPid, true, 30000);
             }
+
             if (injectResult != 0)
             {
                 Console.WriteLine($"注入失败：{DescribeInjectResult(injectResult)}");
                 ZZZTouchRelease();
-                // 保持触屏配置：游戏已读入触屏且仍在运行，
-                // 重跑启动器会走「已运行+触屏」接管分支重试注入。
+                // 保持触屏配置：游戏已进入触屏读取路径且仍可能运行。
+                // Sunshine 会话若因此结束，由 prep-cmd Undo 的 --restore-pc 兜底。
                 return 1;
             }
 
-            Console.WriteLine("注入成功。等待游戏窗口客户区就绪...");
+            Console.WriteLine("注入成功，Runtime 已就绪。");
+            notifyRuntimeReady();
+
+            Console.WriteLine("等待游戏窗口客户区就绪...");
             if (!WaitForClientArea(targetPid, 120000))
             {
                 Console.WriteLine("等待窗口客户区超时，保持触屏配置，不写回 PC。");
@@ -459,30 +559,17 @@ namespace ZZZTouchLauncher
                 else
                 {
                     Console.WriteLine("游戏已退出，确保 PC 模式...");
-                    try
-                    {
-                        WritePlatform(dataPath, PlatformPc);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine("确保 PC 配置失败：" + ex.Message);
-                    }
+                    TryWritePc(dataPath, "确保 PC 配置失败：");
                 }
                 ZZZTouchRelease();
-                Console.WriteLine("启动器退出。");
+                Console.WriteLine("会话控制器退出。");
                 return 0;
             }
+
             // 客户区就绪后再等 5 秒，确保游戏已完成初次配置读取，再写回 PC。
             Console.WriteLine("窗口客户区就绪，延迟 5 秒后写回 PC 模式（游戏内存已是触屏）...");
-            System.Threading.Thread.Sleep(5000);
-            try
-            {
-                WritePlatform(dataPath, PlatformPc);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("写回 PC 配置失败：" + ex.Message);
-            }
+            Thread.Sleep(5000);
+            TryWritePc(dataPath, "写回 PC 配置失败：");
 
             Console.WriteLine("监视游戏进程...");
             int wait = ZZZTouchWaitGameExit(uint.MaxValue);
@@ -493,18 +580,79 @@ namespace ZZZTouchLauncher
             else
             {
                 Console.WriteLine("游戏已退出，确保 PC 模式...");
-                try
-                {
-                    WritePlatform(dataPath, PlatformPc);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("确保 PC 配置失败：" + ex.Message);
-                }
+                TryWritePc(dataPath, "确保 PC 配置失败：");
             }
+
             ZZZTouchRelease();
-            Console.WriteLine("启动器退出。");
+            Console.WriteLine("会话控制器退出。");
             return 0;
+        }
+
+        private static int RunInternalSession(string token)
+        {
+            Guid parsed;
+            if (!Guid.TryParseExact(token, "N", out parsed))
+            {
+                Console.WriteLine("内部会话参数无效。");
+                return 2;
+            }
+
+            string eventName = SessionReadyEventPrefix + token;
+            EventWaitHandle readyEvent;
+            try
+            {
+                readyEvent = EventWaitHandle.OpenExisting(eventName);
+            }
+            catch (WaitHandleCannotBeOpenedException)
+            {
+                Console.WriteLine("内部会话握手不存在，拒绝独立启动 --session。");
+                return 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("打开内部会话握手失败：" + ex.Message);
+                return 2;
+            }
+
+            using (readyEvent)
+            {
+                bool notified = false;
+                Action notifyRuntimeReady = delegate
+                {
+                    if (notified)
+                    {
+                        return;
+                    }
+                    readyEvent.Set();
+                    notified = true;
+                };
+                return RunSession(notifyRuntimeReady);
+            }
+        }
+
+        private static int Main(string[] args)
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+
+            if (args.Length == 2 && args[0] == InternalSessionArgument)
+            {
+                return RunInternalSession(args[1]);
+            }
+
+            Console.WriteLine("=== ZZZTouchLauncher ===");
+
+            if (args.Length == 1 && args[0] == "--restore-pc")
+            {
+                return RestorePcConfiguration();
+            }
+
+            if (args.Length != 0)
+            {
+                Console.WriteLine("用法：ZZZTouchLauncher.exe [--restore-pc]");
+                return 2;
+            }
+
+            return StartSessionController();
         }
     }
 }

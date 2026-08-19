@@ -33,7 +33,7 @@ namespace ZZZTouchLauncher
         private static readonly byte[] Magic = new byte[]
         {
             85, 110, 209, 150, 116, 209, 131, 206, 149, 110, 103, 105, 110, 208, 181,
-            46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 209, 129, 116
+            46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 101, 209, 129, 116
         };
 
         // ZZZTouchCore.dll 导出（C++，__cdecl）。
@@ -48,7 +48,6 @@ namespace ZZZTouchLauncher
         [DllImport("ZZZTouchCore.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern void ZZZTouchRelease();
 
-        // user32：用于等待游戏主窗口客户区就绪（>0）后再写回 PC。
         [DllImport("user32.dll")]
         private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
@@ -107,8 +106,6 @@ namespace ZZZTouchLauncher
                 {
                     return null;
                 }
-                // 启动器写回时会把 \ 转义为 \\；手工编辑可能只写单反斜杠，
-                // 统一还原为标准 JSON 转义。
                 return match.Groups[1].Value.Replace("\\\\", "\\");
             }
             catch
@@ -135,9 +132,6 @@ namespace ZZZTouchLauncher
             return processes.Length > 0 ? processes[0] : null;
         }
 
-        // 等待游戏主窗口客户区就绪（宽高均 > 0）。
-        // 游戏初次读取 GENERAL_DATA.bin 发生在客户区真正显示之后，
-        // 写回 PC 必须等到这一刻之后，否则游戏会读到 PC 配置、触屏不生效。
         private static bool WaitForClientArea(uint pid, int timeoutMs)
         {
             int deadline = Environment.TickCount + timeoutMs;
@@ -166,7 +160,6 @@ namespace ZZZTouchLauncher
             return false;
         }
 
-        // 轮询等待用户启动游戏进程，记录其可执行文件所在目录到 config.json。
         private static string WaitForGameAndRecordPath()
         {
             Process observed = null;
@@ -281,9 +274,6 @@ namespace ZZZTouchLauncher
             }
         }
 
-        // 短生命周期入口。子进程使用普通 Process.Start 创建，因此在 Sunshine
-        // 的 Windows Job/process group 中自然继承，不做 detached/breakaway。
-        // wait-all=true 时主入口退出不会结束会话，Sunshine 会继续跟踪 session/game。
         private static int StartSessionController()
         {
             string token = Guid.NewGuid().ToString("N");
@@ -338,8 +328,6 @@ namespace ZZZTouchLauncher
                     Console.WriteLine($"会话控制器已启动（PID={session.Id}），等待 Runtime 就绪...");
                     while (true)
                     {
-                        // 真正的注入成功由 --session 在 ZZZTouchInjectToProcess 返回 0 后置位。
-                        // 父入口只等这个一次性握手，不持有 Core/HHOOK。
                         if (readyEvent.WaitOne(100))
                         {
                             Console.WriteLine("Runtime 已就绪，会话由控制器继续持有；启动入口退出。");
@@ -406,8 +394,6 @@ namespace ZZZTouchLauncher
         {
             Console.WriteLine("=== ZZZTouchLauncher Session ===");
 
-            // 游戏路径：仅来自 config.json；缺失或失效时回退到
-            // 等待用户启动一次游戏、记录路径的自愈流程。
             string gamePath = ReadGamePathFromConfig();
             bool recordedGamePath = false;
 
@@ -476,8 +462,6 @@ namespace ZZZTouchLauncher
                     notifyRuntimeReady);
             }
 
-            // 启动分支或首次路径自愈分支：确保触屏 → 启动/接管 → 注入 →
-            // 通知短生命周期父入口 → 等待客户区就绪 → 写回PC → 常驻到游戏退出。
             Console.WriteLine("确保触屏模式...");
             try
             {
@@ -521,8 +505,6 @@ namespace ZZZTouchLauncher
             int injectResult = ZZZTouchInjectToProcess(targetPid, true, 60000);
             if (injectResult == 1)
             {
-                // 仅冷启动窗口出现慢或启动器进程链变化时重试；
-                // 其他失败重试只会得到误导性的错误码。
                 Console.WriteLine("主窗口未找到，重新定位游戏进程重试...");
                 Thread.Sleep(5000);
                 Process latest = FindRunningGame();
@@ -538,8 +520,6 @@ namespace ZZZTouchLauncher
             {
                 Console.WriteLine($"注入失败：{DescribeInjectResult(injectResult)}");
                 ZZZTouchRelease();
-                // 保持触屏配置：游戏已进入触屏读取路径且仍可能运行。
-                // Sunshine 会话若因此结束，由 prep-cmd Undo 的 --restore-pc 兜底。
                 return 1;
             }
 
@@ -566,7 +546,6 @@ namespace ZZZTouchLauncher
                 return 0;
             }
 
-            // 客户区就绪后再等 5 秒，确保游戏已完成初次配置读取，再写回 PC。
             Console.WriteLine("窗口客户区就绪，延迟 5 秒后写回 PC 模式（游戏内存已是触屏）...");
             Thread.Sleep(5000);
             TryWritePc(dataPath, "写回 PC 配置失败：");

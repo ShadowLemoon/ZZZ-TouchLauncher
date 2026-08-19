@@ -24,7 +24,10 @@ if not exist "%CSC%" (
 
 if not exist "%BUILD%" mkdir "%BUILD%"
 
-"%CSC%" /nologo /platform:x64 /target:exe /reference:System.Runtime.Serialization.dll /out:"%BUILD%\ZZZTouchLauncher.exe" ^
+"%CSC%" /nologo /platform:x64 /target:exe ^
+  /reference:System.Runtime.Serialization.dll ^
+  /reference:System.Xml.dll ^
+  /out:"%BUILD%\ZZZTouchLauncher.exe" ^
   ..\Program.cs ..\Sleepy.cs ..\Properties\AssemblyInfo.cs
 if errorlevel 1 (
   echo FAIL: could not compile ZZZTouchLauncher

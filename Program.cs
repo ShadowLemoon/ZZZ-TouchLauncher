@@ -678,14 +678,20 @@ namespace ZZZTouchLauncher
 
         private static int Main(string[] args)
         {
-            Console.OutputEncoding = Encoding.UTF8;
-
             if (args.Length == 2 &&
                 args[0] == InternalControllerArgument &&
                 uint.TryParse(args[1], out uint controllerPid) &&
                 controllerPid > 0)
             {
                 return RunController(controllerPid);
+            }
+
+            try
+            {
+                Console.OutputEncoding = Encoding.UTF8;
+            }
+            catch (IOException)
+            {
             }
 
             Console.WriteLine("=== ZZZTouchLauncher ===");

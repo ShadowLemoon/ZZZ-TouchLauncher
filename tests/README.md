@@ -9,6 +9,20 @@
 - `ZZZTouchCore.dll`、`ZZZTouchFilterHook.dll` 已构建（`ZZZ-TouchHook/build/Release/`）
 - 本目录下放置这三个 DLL（复制 `ZZZTouchLauncher/bin/Release/` 下的即可）
 
+`--restore-pc` 测试不依赖 Hook DLL 或真实游戏，可单独运行：
+
+```powershell
+.\test_restore_pc.bat
+# 预期：RestorePcSmoke=ok、PASS: --restore-pc smoke test passed
+```
+
+测试只会在被忽略的 `tests/build-restore/` 中创建假游戏目录和 Sleepy 配置，验证：
+
+- `LocalUILayoutPlatform` 从触屏值 `1` 恢复为 PC 值 `2`；
+- 其他配置字段保持不变；
+- 重复恢复幂等；
+- 未知参数返回退出码 `2` 且不改配置。
+
 ## 1. P/Invoke 冒烟测试（PInvokeSmoke.cs）
 
 验证导出符号解析、调用约定、基础返回码。

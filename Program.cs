@@ -9,6 +9,7 @@ namespace ZZZTouchLauncher
 {
     // 生命周期状态机：
     //   启动器运行
+    //   ├─ --restore-pc → 将配置恢复为PC(2) → 退出
     //   ├─ 首次记录路径 → 立即确保触屏(1) → 注入当前游戏 → 写回PC(2) → 常驻
     //   ├─ 游戏已运行？ → 读配置
     //   │   ├─ 触屏(1) → 注入接管 → 不碰配置 → 游戏退出 → 退出
@@ -212,6 +213,36 @@ namespace ZZZTouchLauncher
             Sleepy.WriteString(dataPath, raw, Magic);
         }
 
+        private static int RestorePcConfiguration()
+        {
+            string gamePath = ReadGamePathFromConfig();
+            if (string.IsNullOrEmpty(gamePath))
+            {
+                Console.WriteLine("恢复 PC 配置失败：config.json 未记录游戏路径。");
+                return 1;
+            }
+
+            string dataPath = GeneralDataPath(gamePath);
+            if (!File.Exists(dataPath))
+            {
+                Console.WriteLine("恢复 PC 配置失败：配置文件不存在：" + dataPath);
+                return 1;
+            }
+
+            try
+            {
+                WritePlatform(dataPath, PlatformPc);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("恢复 PC 配置失败：" + ex.Message);
+                return 1;
+            }
+
+            Console.WriteLine("已恢复 PC 配置（LocalUILayoutPlatform=2）：" + dataPath);
+            return 0;
+        }
+
         private static string DescribeInjectResult(int result)
         {
             switch (result)
@@ -256,10 +287,21 @@ namespace ZZZTouchLauncher
             return 0;
         }
 
-        private static int Main()
+        private static int Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
             Console.WriteLine("=== ZZZTouchLauncher ===");
+
+            if (args.Length > 0)
+            {
+                if (args.Length == 1 && args[0] == "--restore-pc")
+                {
+                    return RestorePcConfiguration();
+                }
+
+                Console.WriteLine("用法：ZZZTouchLauncher.exe [--restore-pc]");
+                return 2;
+            }
 
             // 游戏路径：仅来自 config.json；缺失或失效时回退到
             // 等待用户启动一次游戏、记录路径的自愈流程。

@@ -75,3 +75,13 @@ config.json 指向该目录，运行 `ZZZTouchLauncher.exe`：
   时重试，安装失败直接退出。
 - 上述测试为 2026-08-09 离线验证所用脚本的沉淀，验证结论已记录在
   `.pai/plan/tools/20260809_自动触屏启动器.md`。
+
+## 离线测试的边界
+
+离线测试不会创建 Sunshine App Job，也不会覆盖以下实机行为：
+
+- `controllerBreakaway=false/true` 对 Windows Job 归属的影响；
+- Sunshine `Wait All`、Stop 和 `TerminateJobObject` 的生命周期；
+- Controller 脱离 Job 后是否能在宿主结束游戏后继续收尾。
+
+这些内容必须在 Windows + Sunshine + 真实游戏环境中单独验证。

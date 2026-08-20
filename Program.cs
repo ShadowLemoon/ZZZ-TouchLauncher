@@ -52,6 +52,7 @@ namespace ZZZTouchLauncher
             public bool ControllerBreakaway { get; set; }
         }
 
+        // ZZZTouchCore.dll 导出（C++，__cdecl）。
         [DllImport("ZZZTouchCore.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int ZZZTouchInjectToProcess(
             uint pid, [MarshalAs(UnmanagedType.Bool)] bool quiet, uint windowWaitMs);
@@ -62,6 +63,7 @@ namespace ZZZTouchLauncher
         [DllImport("ZZZTouchCore.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern void ZZZTouchRelease();
 
+        // user32：用于等待游戏主窗口客户区就绪（>0）后再写回 PC。
         [DllImport("user32.dll")]
         private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
@@ -74,6 +76,7 @@ namespace ZZZTouchLauncher
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
+        // kernel32：创建隐藏 Controller，并按配置选择继承或脱离当前 Windows Job。
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CreateProcess(
             string lpApplicationName,
@@ -205,6 +208,9 @@ namespace ZZZTouchLauncher
             return processes.Length > 0 ? processes[0] : null;
         }
 
+        // 等待游戏主窗口客户区就绪（宽高均 > 0）。
+        // 游戏初次读取 GENERAL_DATA.bin 发生在客户区真正显示之后，
+        // 写回 PC 必须等到这一刻之后，否则游戏会读到 PC 配置、触屏不生效。
         private static bool WaitForClientArea(uint pid, int timeoutMs)
         {
             int deadline = Environment.TickCount + timeoutMs;
@@ -233,6 +239,8 @@ namespace ZZZTouchLauncher
             return false;
         }
 
+        // 轮询等待用户启动游戏进程，记录其可执行文件所在目录到 config.json。
+        // 返回游戏路径；无法读取路径时返回 null。
         private static string WaitForGameAndRecordPath(LauncherConfig config)
         {
             Process observed = null;
@@ -308,6 +316,7 @@ namespace ZZZTouchLauncher
             }
         }
 
+        // 显式恢复入口：供 Sunshine Undo 或手工调用，把磁盘配置恢复为 PC 模式。
         private static int RestorePcConfiguration()
         {
             LauncherConfig config = ReadConfig();
@@ -353,6 +362,8 @@ namespace ZZZTouchLauncher
             }
         }
 
+        // 默认入口只创建隐藏 Controller；注入、Hook 和游戏生命周期由 Controller 负责。
+        // 按配置请求继承或脱离当前 Windows Job。
         private static bool StartController(uint gamePid, bool breakaway)
         {
             string launcherPath;
@@ -452,6 +463,7 @@ namespace ZZZTouchLauncher
             }
         }
 
+        // Controller 内部模式：持有 Runtime/Hook，完成注入、配置切换和游戏退出后的收尾。
         private static int RunController(uint initialPid)
         {
             LauncherConfig config = ReadConfig();
@@ -480,6 +492,8 @@ namespace ZZZTouchLauncher
             int injectResult = ZZZTouchInjectToProcess(targetPid, true, 60000);
             if (injectResult == 1)
             {
+                // 仅首次注入未找到游戏主窗口时重试；
+                // 其他失败（安装失败/会话残留等）重试只会得到误导性的错误码。
                 Thread.Sleep(5000);
                 Process latest = FindRunningGame();
                 if (latest != null)
@@ -504,10 +518,12 @@ namespace ZZZTouchLauncher
             if (injectResult != 0)
             {
                 Console.WriteLine($"Controller 注入失败：{DescribeInjectResult(injectResult)}");
+                // 保持触屏配置：游戏可能已读入触屏且仍在运行，重跑启动器会重新走接管分支。
                 ZZZTouchRelease();
                 return 1;
             }
 
+            // 客户区未就绪时不能写回 PC；保持触屏配置，等待游戏退出后再尝试恢复。
             if (!WaitForClientArea(targetPid, 120000))
             {
                 int waitTimeout = ZZZTouchWaitGameExit(uint.MaxValue);
@@ -519,9 +535,12 @@ namespace ZZZTouchLauncher
                 return 0;
             }
 
+            // 客户区就绪后再等 5 秒，确保游戏已完成初次配置读取，再写回 PC。
+            // 此时游戏运行态已经是触屏，磁盘配置可以恢复为 PC。
             Thread.Sleep(5000);
             TryWritePc(dataPath, "写回 PC 配置失败：");
 
+            // Controller 继续持有 Hook，直到游戏退出；退出后再次确保 PC 配置，再释放 Runtime。
             int wait = ZZZTouchWaitGameExit(uint.MaxValue);
             if (wait == 0)
             {
@@ -532,9 +551,11 @@ namespace ZZZTouchLauncher
             return 0;
         }
 
+        // 默认 orchestrator：只负责配置/进程编排，启动 Controller 后立即退出。
         private static int RunLauncher()
         {
             LauncherConfig config = ReadConfig();
+            // 游戏路径来自 config.json；缺失或失效时回退到等待用户启动一次游戏的自愈流程。
             string gamePath = config.GamePath;
             bool recordedGamePath = false;
 
@@ -573,6 +594,7 @@ namespace ZZZTouchLauncher
             }
 
             Process running = FindRunningGame();
+            // 接管分支：不修改已有配置；仅在游戏已是触屏模式时启动 Controller。
             if (running != null && !recordedGamePath)
             {
                 try
@@ -607,6 +629,8 @@ namespace ZZZTouchLauncher
                 }
             }
 
+            // 启动分支或首次路径自愈分支：确保触屏 → 启动/接管游戏 → 启动 Controller。
+            // 注入、客户区等待、写回 PC 和游戏退出后的收尾由 Controller 完成。
             Console.WriteLine("确保触屏模式...");
             try
             {
@@ -639,6 +663,7 @@ namespace ZZZTouchLauncher
                 catch (Exception ex)
                 {
                     Console.WriteLine("游戏启动失败：" + ex.Message);
+                    // 启动失败：游戏未进入触屏读取路径，恢复 PC 保持干净状态。
                     TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
                 }
@@ -646,6 +671,7 @@ namespace ZZZTouchLauncher
                 if (started == null)
                 {
                     Console.WriteLine("游戏启动失败");
+                    // Process.Start 未返回进程对象，同样恢复 PC 配置。
                     TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
                 }
@@ -663,6 +689,7 @@ namespace ZZZTouchLauncher
                     (uint)started.Id,
                     config.ControllerBreakaway))
                 {
+                    // Controller 创建失败时没有接管者，恢复 PC 配置。
                     TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
                 }

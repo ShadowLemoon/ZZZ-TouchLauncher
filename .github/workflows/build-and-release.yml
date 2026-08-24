@@ -1,0 +1,170 @@
+name: Build and Release
+
+on:
+  pull_request:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Launcher
+        run: msbuild ZZZTouchLauncher.csproj /t:Rebuild /p:Configuration=Release /p:Platform=AnyCPU
+
+      - name: Test legacy config restore
+        run: tests\test_restore_pc.bat
+
+      - name: Download and verify pinned Runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $pin = Get-Content -LiteralPath 'runtime-pin.json' -Raw | ConvertFrom-Json
+          $runtimeArchive = Join-Path $env:RUNNER_TEMP $pin.asset
+          $runtimeDirectory = Join-Path $env:RUNNER_TEMP 'ZZZTouchRuntime'
+          $runtimeUrl = "https://github.com/ShadowLemoon/ZZZ-TouchRuntime/releases/download/$($pin.version)/$($pin.asset)"
+
+          Write-Host "Runtime pin: $($pin.version) ($($pin.asset))"
+          Invoke-WebRequest -Uri $runtimeUrl -OutFile $runtimeArchive
+
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeArchive).Hash.ToLowerInvariant()
+          if ($archiveHash -ne $pin.archiveSha256) {
+            throw "Runtime archive SHA-256 mismatch: $archiveHash"
+          }
+
+          New-Item -ItemType Directory -Path $runtimeDirectory | Out-Null
+          Expand-Archive -Path $runtimeArchive -DestinationPath $runtimeDirectory
+
+          $expectedFiles = @($pin.files.PSObject.Properties.Name | Sort-Object)
+          $actualFiles = @(
+            Get-ChildItem -Path $runtimeDirectory -Recurse -File |
+              ForEach-Object {
+                [System.IO.Path]::GetRelativePath($runtimeDirectory, $_.FullName).Replace('\', '/')
+              } |
+              Sort-Object
+          )
+          if (($actualFiles -join '|') -ne ($expectedFiles -join '|')) {
+            throw "Unexpected Runtime archive contents: $($actualFiles -join ', ')"
+          }
+
+          foreach ($name in $expectedFiles) {
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $runtimeDirectory $name)).Hash.ToLowerInvariant()
+            if ($actualHash -ne $pin.files.$name) {
+              throw "$name SHA-256 mismatch: $actualHash"
+            }
+          }
+
+          "RUNTIME_DIRECTORY=$runtimeDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Stage Launcher package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $stageDirectory = Join-Path $env:RUNNER_TEMP 'ZZZTouchLauncher-stage'
+          New-Item -ItemType Directory -Path $stageDirectory | Out-Null
+
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'bin/Release/ZZZTouchLauncher.exe') $stageDirectory
+          Copy-Item (Join-Path $env:RUNTIME_DIRECTORY 'ZZZTouchCore.dll') $stageDirectory
+          Copy-Item (Join-Path $env:RUNTIME_DIRECTORY 'ZZZTouchRuntime.dll') $stageDirectory
+
+          $packageFiles = @(
+            Get-ChildItem -Path $stageDirectory -File |
+              Select-Object -ExpandProperty Name |
+              Sort-Object
+          )
+          $expectedFiles = @('ZZZTouchCore.dll', 'ZZZTouchLauncher.exe', 'ZZZTouchRuntime.dll')
+          if (($packageFiles -join '|') -ne ($expectedFiles -join '|')) {
+            throw "Unexpected Launcher package contents: $($packageFiles -join ', ')"
+          }
+
+          "STAGE_DIRECTORY=$stageDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload Launcher package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZZZTouchLauncher-win-x64-r${{ github.run_number }}
+          path: ${{ env.STAGE_DIRECTORY }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      LAUNCHER_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: runtime-pin.json
+          sparse-checkout-cone-mode: false
+
+      - name: Download Launcher package
+        uses: actions/download-artifact@v7
+        with:
+          name: ZZZTouchLauncher-win-x64-r${{ github.run_number }}
+          path: package
+
+      - name: Compress Launcher package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $stageDirectory = Join-Path $env:GITHUB_WORKSPACE 'package'
+          $packagePath = Join-Path $env:RUNNER_TEMP "ZZZTouchLauncher-$env:LAUNCHER_TAG-win-x64.zip"
+
+          $packageFiles = @(
+            Get-ChildItem -Path $stageDirectory -File |
+              Select-Object -ExpandProperty Name |
+              Sort-Object
+          )
+          $expectedFiles = @('ZZZTouchCore.dll', 'ZZZTouchLauncher.exe', 'ZZZTouchRuntime.dll')
+          if (($packageFiles -join '|') -ne ($expectedFiles -join '|')) {
+            throw "Unexpected Launcher package contents: $($packageFiles -join ', ')"
+          }
+
+          # Re-verify the pinned Runtime hashes after the artifact round trip.
+          $pin = Get-Content -LiteralPath 'runtime-pin.json' -Raw | ConvertFrom-Json
+          foreach ($name in $pin.files.PSObject.Properties.Name) {
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageDirectory $name)).Hash.ToLowerInvariant()
+            if ($actualHash -ne $pin.files.$name) {
+              throw "$name SHA-256 mismatch: $actualHash"
+            }
+          }
+
+          Compress-Archive -Path (Join-Path $stageDirectory '*') -DestinationPath $packagePath
+          $packageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagePath).Hash.ToLowerInvariant()
+          "Package: $([System.IO.Path]::GetFileName($packagePath))" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "Runtime: $($pin.version)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "SHA-256: ``$packageHash``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "LAUNCHER_PACKAGE=$packagePath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create Launcher GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release create $env:LAUNCHER_TAG $env:LAUNCHER_PACKAGE `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --title $env:LAUNCHER_TAG `
+            --generate-notes
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE"
+          }

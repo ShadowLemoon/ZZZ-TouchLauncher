@@ -1,0 +1,9 @@
+{
+  "version": "v1.0.0",
+  "asset": "ZZZTouchRuntime-v1.0.0-win-x64.zip",
+  "archiveSha256": "e8fba7e8b237ecd9806a225bdaced97cc0f1eb8ae22b344ae0d3f47439e4f1c2",
+  "files": {
+    "ZZZTouchCore.dll": "f85c4cd14dccad0fb8411709bdd98098e7f593e9ccbafb378c65c883402f3feb",
+    "ZZZTouchRuntime.dll": "cd5aeb4bbfe4cf28f22d265e0aa3df58dcc7551b92f4a7c65b13829cf0b75fcc"
+  }
+}

@@ -1,9 +1,9 @@
 {
-  "version": "v1.0.2",
-  "asset": "ZZZTouchRuntime-v1.0.2-win-x64.zip",
-  "archiveSha256": "3f984489b48c2c90f56b3535cb192d839fef3c76938368e1a961a76f159f67e7",
+  "version": "v1.0.3",
+  "asset": "ZZZTouchRuntime-v1.0.3-win-x64.zip",
+  "archiveSha256": "526ea1d716e123cd54b795df1d02b7cfe02e0c5afa7c0be721e8dd9383842840",
   "files": {
-    "ZZZTouchCore.dll": "e14af3b1f4fa8980531f89336c8f2e0ef95adea49182efeef1658f0e7780dcbb",
-    "ZZZTouchRuntime.dll": "00d98d5777963ffd58e8eaca0394cf2971845295f9a577b7624b353498097a76"
+    "ZZZTouchCore.dll": "dfd6fade5bcb4c6924d92c6d11deca3b215d40cf28fd9339b0adcfd0936e57ce",
+    "ZZZTouchRuntime.dll": "796dee2e83a5d44aab19eec8d54f6dbe7e470cd9df570420e18eadeb66c83e5d"
   }
 }

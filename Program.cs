@@ -197,6 +197,61 @@ namespace ZZZTouchLauncher
             }
         }
 
+        private static string BuildCommandLineArguments(string[] arguments)
+        {
+            var commandLine = new StringBuilder();
+            foreach (string argument in arguments)
+            {
+                if (commandLine.Length > 0)
+                {
+                    commandLine.Append(' ');
+                }
+                AppendCommandLineArgument(commandLine, argument);
+            }
+            return commandLine.ToString();
+        }
+
+        private static void AppendCommandLineArgument(StringBuilder commandLine, string argument)
+        {
+            bool needsQuotes = argument.Length == 0;
+            for (int i = 0; i < argument.Length && !needsQuotes; i++)
+            {
+                needsQuotes = char.IsWhiteSpace(argument[i]) || argument[i] == '"';
+            }
+
+            if (!needsQuotes)
+            {
+                commandLine.Append(argument);
+                return;
+            }
+
+            commandLine.Append('"');
+            int backslashCount = 0;
+            foreach (char value in argument)
+            {
+                if (value == '\\')
+                {
+                    backslashCount++;
+                    continue;
+                }
+
+                if (value == '"')
+                {
+                    commandLine.Append('\\', backslashCount * 2 + 1);
+                }
+                else
+                {
+                    commandLine.Append('\\', backslashCount);
+                }
+
+                backslashCount = 0;
+                commandLine.Append(value);
+            }
+
+            commandLine.Append('\\', backslashCount * 2);
+            commandLine.Append('"');
+        }
+
         private static Process FindRunningGame()
         {
             Process[] processes = Process.GetProcessesByName(GameProcessName);
@@ -552,7 +607,7 @@ namespace ZZZTouchLauncher
         }
 
         // 默认 orchestrator：只负责配置/进程编排，启动 Controller 后立即退出。
-        private static int RunLauncher()
+        private static int RunLauncher(string[] gameArguments)
         {
             LauncherConfig config = ReadConfig();
             // 游戏路径来自 config.json；缺失或失效时回退到等待用户启动一次游戏的自愈流程。
@@ -594,6 +649,12 @@ namespace ZZZTouchLauncher
             }
 
             Process running = FindRunningGame();
+            if (running != null && gameArguments.Length > 0)
+            {
+                Console.WriteLine(
+                    $"警告：游戏已在运行，无法透传 {gameArguments.Length} 个启动参数。");
+            }
+
             // 接管分支：不修改已有配置；仅在游戏已是触屏模式时启动 Controller。
             if (running != null && !recordedGamePath)
             {
@@ -655,6 +716,7 @@ namespace ZZZTouchLauncher
                     var gameStartInfo = new ProcessStartInfo
                     {
                         FileName = exePath,
+                        Arguments = BuildCommandLineArguments(gameArguments),
                         WorkingDirectory = gamePath,
                         UseShellExecute = false,
                     };
@@ -728,13 +790,18 @@ namespace ZZZTouchLauncher
                 return RestorePcConfiguration();
             }
 
-            if (args.Length != 0)
+            foreach (string argument in args)
             {
-                Console.WriteLine("用法：ZZZTouchLauncher.exe [--restore-pc]");
-                return 2;
+                if (argument == "--restore-pc" || argument == InternalControllerArgument)
+                {
+                    Console.WriteLine("用法：");
+                    Console.WriteLine("  ZZZTouchLauncher.exe [游戏参数...]");
+                    Console.WriteLine("  ZZZTouchLauncher.exe --restore-pc");
+                    return 2;
+                }
             }
 
-            return RunLauncher();
+            return RunLauncher(args);
         }
     }
 }

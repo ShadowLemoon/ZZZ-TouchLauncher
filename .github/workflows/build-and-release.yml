@@ -25,6 +25,9 @@ jobs:
       - name: Test legacy config restore
         run: tests\test_restore_pc.bat
 
+      - name: Test game argument forwarding
+        run: tests\test_argument_forwarding.bat
+
       - name: Download and verify pinned Runtime
         shell: pwsh
         run: |

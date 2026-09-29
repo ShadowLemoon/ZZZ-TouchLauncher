@@ -101,17 +101,23 @@ namespace ZZZTouchLauncher
                 return 1;
             }
 
-            int invalidArgumentExitCode = RunLauncher(launcherPath, "--invalid", out output);
-            if (invalidArgumentExitCode != 2)
+            int invalidOwnArgumentExitCode = RunLauncher(
+                launcherPath,
+                "--restore-pc --game-argument",
+                out output);
+            if (invalidOwnArgumentExitCode != 2)
             {
-                Console.WriteLine("Invalid argument exit code was " + invalidArgumentExitCode + ", expected 2.");
+                Console.WriteLine(
+                    "Invalid launcher argument combination exit code was " +
+                    invalidOwnArgumentExitCode +
+                    ", expected 2.");
                 Console.WriteLine(output);
                 return 1;
             }
 
             if (Sleepy.ReadString(dataPath, Magic) != restored)
             {
-                Console.WriteLine("Invalid argument changed the configuration.");
+                Console.WriteLine("Invalid launcher argument combination changed the configuration.");
                 return 1;
             }
 

@@ -21,7 +21,16 @@
 - `LocalUILayoutPlatform` 从触屏值 `1` 恢复为 PC 值 `2`；
 - 其他配置字段保持不变；
 - 重复恢复幂等；
-- 未知参数返回退出码 `2` 且不改配置。
+- 启动器保留参数的错误组合返回退出码 `2` 且不改配置。
+
+参数透传可单独运行：
+
+```powershell
+.\test_argument_forwarding.bat
+# 预期：ArgumentForwardSmoke=ok、PASS: game argument forwarding smoke test passed
+```
+
+该测试使用假 `ZenlessZoneZero.exe` 记录收到的参数，验证普通参数、带空格参数、空参数、双引号和末尾反斜杠在透传后保持不变。若真实游戏正在运行，测试会直接失败，避免接触真实进程。
 
 ## 1. P/Invoke 冒烟测试（PInvokeSmoke.cs）
 

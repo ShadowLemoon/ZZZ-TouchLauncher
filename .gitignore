@@ -3,6 +3,7 @@ bin/
 obj/
 build-fake/
 build-restore/
+build-arguments/
 Testing/
 *.exe
 *.dll

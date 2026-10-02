@@ -42,7 +42,9 @@ if errorlevel 1 (
 
 "%CSC%" /nologo /platform:x64 /target:exe ^
   /main:ZZZTouchLauncher.ArgumentForwardSmoke ^
-  /out:"%BUILD%\ArgumentForwardSmoke.exe" ArgumentForwardSmoke.cs ..\Sleepy.cs
+  /reference:System.Runtime.Serialization.dll ^
+  /reference:System.Xml.dll ^
+  /out:"%BUILD%\ArgumentForwardSmoke.exe" ArgumentForwardSmoke.cs ..\Sleepy.cs ..\Program.cs
 if errorlevel 1 (
   echo FAIL: could not compile ArgumentForwardSmoke
   exit /b 1

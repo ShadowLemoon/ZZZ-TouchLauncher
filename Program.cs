@@ -30,6 +30,8 @@ namespace ZZZTouchLauncher
     {
         private const string GameExecutableName = "ZenlessZoneZero.exe";
         private const string GameProcessName = "ZenlessZoneZero";
+        private const string SteamAppIdFileName = "steam_appid.txt";
+        private const string SteamAppId = "4162040";
         private const string InternalControllerArgument = "--controller";
         private const uint CreateBreakawayFromJob = 0x01000000;
         private const uint CreateNoWindow = 0x08000000;
@@ -94,6 +96,18 @@ namespace ZZZTouchLauncher
         private static extern bool CloseHandle(IntPtr hObject);
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        private delegate bool ConsoleCtrlHandler(uint controlType);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetConsoleCtrlHandler(
+            ConsoleCtrlHandler handlerRoutine,
+            bool add);
+
+        private const uint CtrlCEvent = 0;
+        private const uint CtrlBreakEvent = 1;
+        private const uint CloseEvent = 2;
+        private const uint LogoffEvent = 5;
+        private const uint ShutdownEvent = 6;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
@@ -136,6 +150,68 @@ namespace ZZZTouchLauncher
             public IntPtr hThread;
             public uint dwProcessId;
             public uint dwThreadId;
+        }
+
+        internal sealed class ConsoleCloseRestoreScope : IDisposable
+        {
+            private readonly string dataPath;
+            private readonly ConsoleCtrlHandler handler;
+            private int restorePending;
+            private int closeRequested;
+            private bool registered;
+
+            internal bool CloseRequested
+            {
+                get { return Interlocked.CompareExchange(ref closeRequested, 0, 0) != 0; }
+            }
+
+            internal ConsoleCloseRestoreScope(string dataPath)
+            {
+                this.dataPath = dataPath;
+                restorePending = 1;
+                handler = HandleConsoleControl;
+                if (!SetConsoleCtrlHandler(handler, true))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                registered = true;
+            }
+
+            internal bool HandleConsoleControl(uint controlType)
+            {
+                if (controlType != CtrlCEvent &&
+                    controlType != CtrlBreakEvent &&
+                    controlType != CloseEvent &&
+                    controlType != LogoffEvent &&
+                    controlType != ShutdownEvent)
+                {
+                    return false;
+                }
+
+                Interlocked.Exchange(ref closeRequested, 1);
+                if (Interlocked.Exchange(ref restorePending, 0) == 1)
+                {
+                    TryWritePc(dataPath, "控制台关闭时恢复 PC 配置失败：");
+                }
+
+                // Continue to the next handler so Windows can close the process normally.
+                return false;
+            }
+
+            internal void Complete()
+            {
+                Interlocked.Exchange(ref restorePending, 0);
+            }
+
+            public void Dispose()
+            {
+                Complete();
+                if (registered)
+                {
+                    SetConsoleCtrlHandler(handler, false);
+                    registered = false;
+                }
+            }
         }
 
         private static string ConfigPath
@@ -197,7 +273,7 @@ namespace ZZZTouchLauncher
             }
         }
 
-        private static string BuildCommandLineArguments(string[] arguments)
+        internal static string BuildCommandLineArguments(string[] arguments)
         {
             var commandLine = new StringBuilder();
             foreach (string argument in arguments)
@@ -250,6 +326,56 @@ namespace ZZZTouchLauncher
 
             commandLine.Append('\\', backslashCount * 2);
             commandLine.Append('"');
+        }
+
+        internal static bool HasSteamAppId(string gamePath)
+        {
+            return File.Exists(Path.Combine(gamePath, SteamAppIdFileName));
+        }
+
+        internal static string BuildSteamLaunchUri(string[] gameArguments)
+        {
+            string arguments = BuildCommandLineArguments(gameArguments);
+            string encodedArguments = Uri.EscapeDataString(arguments);
+            return "steam://run/" + SteamAppId + "//" + encodedArguments;
+        }
+
+        private static Process StartSteamGame(
+            string[] gameArguments,
+            ConsoleCloseRestoreScope restoreScope)
+        {
+            string launchUri = BuildSteamLaunchUri(gameArguments);
+            Console.WriteLine("检测到 steam_appid.txt，使用 Steam 启动游戏（AppID=" + SteamAppId + "）。");
+            Console.WriteLine("Steam 启动 URI：" + launchUri);
+
+            try
+            {
+                using (Process steamRequest = Process.Start(new ProcessStartInfo
+                {
+                    FileName = launchUri,
+                    UseShellExecute = true,
+                }))
+                {
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Steam 启动失败：" + ex.Message);
+                return null;
+            }
+
+            Console.WriteLine("Steam 启动请求已提交，等待游戏进程出现；关闭此控制台将恢复 PC 配置。");
+            while (!restoreScope.CloseRequested)
+            {
+                Process game = FindRunningGame();
+                if (game != null)
+                {
+                    return game;
+                }
+                Thread.Sleep(1000);
+            }
+
+            return null;
         }
 
         private static Process FindRunningGame()
@@ -708,45 +834,61 @@ namespace ZZZTouchLauncher
             }
 
             Process started = running;
-            if (started == null)
-            {
-                Console.WriteLine("启动游戏...");
-                try
-                {
-                    var gameStartInfo = new ProcessStartInfo
-                    {
-                        FileName = exePath,
-                        Arguments = BuildCommandLineArguments(gameArguments),
-                        WorkingDirectory = gamePath,
-                        UseShellExecute = false,
-                    };
-                    started = Process.Start(gameStartInfo);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("游戏启动失败：" + ex.Message);
-                    // 启动失败：游戏未进入触屏读取路径，恢复 PC 保持干净状态。
-                    TryWritePc(dataPath, "恢复 PC 配置失败：");
-                    return 1;
-                }
-
-                if (started == null)
-                {
-                    Console.WriteLine("游戏启动失败");
-                    // Process.Start 未返回进程对象，同样恢复 PC 配置。
-                    TryWritePc(dataPath, "恢复 PC 配置失败：");
-                    return 1;
-                }
-
-                Console.WriteLine($"游戏进程已启动（PID={started.Id}）。");
-            }
-            else
-            {
-                Console.WriteLine($"已获取游戏路径并更新触屏配置（PID={started.Id}）。");
-            }
-
+            ConsoleCloseRestoreScope steamRestoreScope = null;
             try
             {
+                if (started == null)
+                {
+                    if (HasSteamAppId(gamePath))
+                    {
+                        try
+                        {
+                            steamRestoreScope = new ConsoleCloseRestoreScope(dataPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("无法注册控制台关闭恢复处理器：" + ex.Message);
+                            TryWritePc(dataPath, "恢复 PC 配置失败：");
+                            return 1;
+                        }
+
+                        started = StartSteamGame(gameArguments, steamRestoreScope);
+                    }
+                    else
+                    {
+                        Console.WriteLine("启动游戏...");
+                        try
+                        {
+                            var gameStartInfo = new ProcessStartInfo
+                            {
+                                FileName = exePath,
+                                Arguments = BuildCommandLineArguments(gameArguments),
+                                WorkingDirectory = gamePath,
+                                UseShellExecute = false,
+                            };
+                            started = Process.Start(gameStartInfo);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("游戏启动失败：" + ex.Message);
+                        }
+                    }
+
+                    if (started == null)
+                    {
+                        Console.WriteLine("游戏启动失败");
+                        // 启动请求明确失败或控制台关闭；恢复操作是幂等的。
+                        TryWritePc(dataPath, "恢复 PC 配置失败：");
+                        return 1;
+                    }
+
+                    Console.WriteLine($"游戏进程已启动（PID={started.Id}）。");
+                }
+                else
+                {
+                    Console.WriteLine($"已获取游戏路径并更新触屏配置（PID={started.Id}）。");
+                }
+
                 if (!StartController(
                     (uint)started.Id,
                     config.ControllerBreakaway))
@@ -755,10 +897,22 @@ namespace ZZZTouchLauncher
                     TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
                 }
+
+                if (steamRestoreScope != null)
+                {
+                    steamRestoreScope.Complete();
+                }
             }
             finally
             {
-                started.Dispose();
+                if (started != null)
+                {
+                    started.Dispose();
+                }
+                if (steamRestoreScope != null)
+                {
+                    steamRestoreScope.Dispose();
+                }
             }
 
             Console.WriteLine("后台 Controller 已接管后续注入与生命周期；启动器退出。");

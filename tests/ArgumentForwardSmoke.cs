@@ -33,9 +33,28 @@ namespace ZZZTouchLauncher
                 return 1;
             }
 
+            string[] steamArguments =
+            [
+                "--flag",
+                "two words",
+                "",
+                "quote\"value",
+                "C:\\path with space\\"
+            ];
+            string steamUri = Program.BuildSteamLaunchUri(steamArguments);
+            const string steamPrefix = "steam://run/4162040//";
+            if (!steamUri.StartsWith(steamPrefix, StringComparison.Ordinal) ||
+                Uri.UnescapeDataString(steamUri.Substring(steamPrefix.Length)) !=
+                    Program.BuildCommandLineArguments(steamArguments))
+            {
+                Console.WriteLine("FAIL: Steam launch URI does not preserve arguments");
+                return 1;
+            }
+
             string launcherPath = Path.GetFullPath(args[0]);
             string gameDirectory = Path.GetFullPath(args[1]);
             string gamePath = Path.Combine(gameDirectory, "ZenlessZoneZero.exe");
+            string steamAppIdPath = Path.Combine(gameDirectory, "steam_appid.txt");
             if (!File.Exists(launcherPath) || !File.Exists(gamePath))
             {
                 Console.WriteLine("FAIL: launcher or argument echo game is missing");
@@ -61,6 +80,15 @@ namespace ZZZTouchLauncher
             if (File.Exists(receivedPath))
             {
                 File.Delete(receivedPath);
+            }
+            if (File.Exists(steamAppIdPath))
+            {
+                File.Delete(steamAppIdPath);
+            }
+            if (Program.HasSteamAppId(gameDirectory))
+            {
+                Console.WriteLine("FAIL: direct-launch fixture was detected as Steam");
+                return 1;
             }
 
             var startInfo = new ProcessStartInfo
@@ -106,14 +134,7 @@ namespace ZZZTouchLauncher
                 return 1;
             }
 
-            string[] expected = new string[]
-            {
-                "--flag",
-                "two words",
-                "",
-                "quote\"value",
-                "C:\\path with space\\"
-            };
+            string[] expected = steamArguments;
             string[] actualLines = File.ReadAllLines(receivedPath, Encoding.UTF8);
             if (actualLines.Length != expected.Length)
             {
@@ -131,6 +152,30 @@ namespace ZZZTouchLauncher
                         "FAIL: argument " + i + " was [" + actual + "], expected [" + expected[i] + "]");
                     return 1;
                 }
+            }
+
+            File.WriteAllText(steamAppIdPath, "4162040\n", new UTF8Encoding(false));
+            if (!Program.HasSteamAppId(gameDirectory))
+            {
+                Console.WriteLine("FAIL: steam_appid.txt was not detected");
+                return 1;
+            }
+            File.Delete(steamAppIdPath);
+
+            Sleepy.WriteString(dataPath, "{\"LocalUILayoutPlatform\":1}", Magic);
+            using (var restoreScope = new Program.ConsoleCloseRestoreScope(dataPath))
+            {
+                if (restoreScope.HandleConsoleControl(2))
+                {
+                    Console.WriteLine("FAIL: console close handler suppressed normal termination");
+                    return 1;
+                }
+            }
+            string restored = Sleepy.ReadString(dataPath, Magic);
+            if (!restored.Contains("\"LocalUILayoutPlatform\":2"))
+            {
+                Console.WriteLine("FAIL: console close handler did not restore PC mode");
+                return 1;
             }
 
             Console.WriteLine("ArgumentForwardSmoke=ok");

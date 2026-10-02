@@ -26,6 +26,19 @@
 - 游戏已启动且为触屏模式：后台 Controller 接管注入与生命周期；
 - 游戏已启动且为 PC 模式：不注入、不修改配置，直接退出。
 
+## Steam 模式
+
+如果 `gamePath` 目录下存在 `steam_appid.txt`，启动器会自动切换到 Steam 模式：
+
+- 不直接启动 `ZenlessZoneZero.exe`；
+- 通过 `steam://run/4162040//` 请求 Steam 启动 AppID `4162040`；
+- 等待 Steam 真正拉起 `ZenlessZoneZero.exe` 后，再启动后台 Controller；
+- 启动器收到的游戏参数会整体编码后传入 Steam URI。
+
+Steam 启动请求提交后，启动器会一直等待游戏进程出现，不设置自动超时。等待期间关闭控制台窗口、按 `Ctrl+C` 或系统注销/关机时，会尝试把配置恢复为 PC 模式。Steam 可能要求用户登录、更新或确认启动；如果不希望继续等待，可关闭控制台，随后重新运行 `--restore-pc` 确认恢复结果。
+
+Steam 客户端和启动器最好使用相同的权限级别。启动器要求管理员权限，而 Steam 若以普通权限运行，Steam 启动或游戏注入可能受到 Windows 权限隔离影响。
+
 ## 游戏启动参数
 
 传给启动器的非保留参数会在启动新游戏时透传给 `ZenlessZoneZero.exe`：

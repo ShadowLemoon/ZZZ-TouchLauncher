@@ -100,7 +100,7 @@ try {
     Write-Host ''
     Write-Host 'Next steps:'
     Write-Host '  1. git diff runtime-pin.json'
-    Write-Host '  2. Run the offline smoke test: tests\test_restore_pc.bat'
+    Write-Host '  2. Run the offline smoke test: tests\test_argument_forwarding.bat'
     Write-Host '  3. Commit, then push a new Launcher v* tag to publish.'
 }
 finally {

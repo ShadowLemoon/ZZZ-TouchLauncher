@@ -6,26 +6,26 @@ using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace ZZZTouchLauncher
 {
     // 生命周期：
     //   默认入口（orchestrator）
-    //   ├─ 读取/记录配置
-    //   ├─ 已运行+Touch → 启动隐藏 controller 接管 → 入口退出
-    //   ├─ 已运行+PC → 不接管 → 入口退出
-    //   └─ 未运行/首次记录 → Touch → 启动/定位游戏 → 启动隐藏 controller → 入口退出
+    //   ├─ 读取/记录 config.json（游戏路径）
+    //   ├─ 游戏已运行 → 不接管（触屏布局必须在游戏启动前注入）→ 入口退出
+    //   └─ 游戏未运行 → 启动游戏（直接或经 Steam）→ 启动隐藏 controller → 入口退出
+    //
+    //   --wait（等进程模式）
+    //   ├─ 不启动游戏，等待用户自行启动游戏进程（比如经 HoYoPlay）
+    //   └─ 进程一出现就启动隐藏 controller 注入 → 入口退出
     //
     //   --controller <pid>（内部模式）
     //   ├─ 持有 ZZZTouchCore / WH_GETMESSAGE Hook
-    //   ├─ 注入 Runtime
-    //   ├─ 等客户区就绪 + 5 秒 → 写回 PC
-    //   └─ 等游戏退出 → 再确保 PC → Release → 退出
+    //   ├─ 注入 ZZZTouchRuntime（游戏进程内固定触屏布局、合成多指触点）
+    //   └─ 等游戏退出 → Release → 退出
     //
-    //   --restore-pc
-    //   └─ Sunshine Undo / 手工恢复：将磁盘配置恢复为 PC(2) → 退出
+    // 启动器不再读写任何游戏配置（GENERAL_DATA.bin）。
     internal static class Program
     {
         private const string GameExecutableName = "ZenlessZoneZero.exe";
@@ -33,16 +33,12 @@ namespace ZZZTouchLauncher
         private const string SteamAppIdFileName = "steam_appid.txt";
         private const string SteamAppId = "4162040";
         private const string InternalControllerArgument = "--controller";
+        // 等进程模式：启动器不启动游戏，等游戏进程出现后立即注入。
+        private const string WaitArgument = "--wait";
+        // 等进程模式的轮询间隔：触屏布局必须在界面建好之前固定，越早发现进程越好。
+        private const int WaitPollIntervalMs = 50;
         private const uint CreateBreakawayFromJob = 0x01000000;
         private const uint CreateNoWindow = 0x08000000;
-        private const int PlatformTouch = 1;
-        private const int PlatformPc = 2;
-
-        private static readonly byte[] Magic = new byte[]
-        {
-            85, 110, 209, 150, 116, 209, 131, 206, 149, 110, 103, 105, 110, 208, 181,
-            46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 101, 209, 129, 116
-        };
 
         [DataContract]
         private sealed class LauncherConfig
@@ -152,11 +148,10 @@ namespace ZZZTouchLauncher
             public uint dwThreadId;
         }
 
-        internal sealed class ConsoleCloseRestoreScope : IDisposable
+        // 等待 Steam 拉起游戏期间监听控制台关闭 / Ctrl+C / 注销 / 关机，用于退出等待循环。
+        internal sealed class ConsoleCloseScope : IDisposable
         {
-            private readonly string dataPath;
             private readonly ConsoleCtrlHandler handler;
-            private int restorePending;
             private int closeRequested;
             private bool registered;
 
@@ -165,10 +160,8 @@ namespace ZZZTouchLauncher
                 get { return Interlocked.CompareExchange(ref closeRequested, 0, 0) != 0; }
             }
 
-            internal ConsoleCloseRestoreScope(string dataPath)
+            internal ConsoleCloseScope()
             {
-                this.dataPath = dataPath;
-                restorePending = 1;
                 handler = HandleConsoleControl;
                 if (!SetConsoleCtrlHandler(handler, true))
                 {
@@ -189,23 +182,12 @@ namespace ZZZTouchLauncher
                 }
 
                 Interlocked.Exchange(ref closeRequested, 1);
-                if (Interlocked.Exchange(ref restorePending, 0) == 1)
-                {
-                    TryWritePc(dataPath, "控制台关闭时恢复 PC 配置失败：");
-                }
-
                 // Continue to the next handler so Windows can close the process normally.
                 return false;
             }
 
-            internal void Complete()
-            {
-                Interlocked.Exchange(ref restorePending, 0);
-            }
-
             public void Dispose()
             {
-                Complete();
                 if (registered)
                 {
                     SetConsoleCtrlHandler(handler, false);
@@ -221,16 +203,6 @@ namespace ZZZTouchLauncher
                 string directory = AppDomain.CurrentDomain.BaseDirectory;
                 return Path.Combine(directory, "config.json");
             }
-        }
-
-        private static string GeneralDataPath(string gamePath)
-        {
-            return Path.Combine(
-                gamePath,
-                "ZenlessZoneZero_Data",
-                "Persistent",
-                "LocalStorage",
-                "GENERAL_DATA.bin");
         }
 
         private static LauncherConfig ReadConfig()
@@ -342,7 +314,7 @@ namespace ZZZTouchLauncher
 
         private static Process StartSteamGame(
             string[] gameArguments,
-            ConsoleCloseRestoreScope restoreScope)
+            ConsoleCloseScope closeScope)
         {
             string launchUri = BuildSteamLaunchUri(gameArguments);
             Console.WriteLine("检测到 steam_appid.txt，使用 Steam 启动游戏（AppID=" + SteamAppId + "）。");
@@ -364,8 +336,8 @@ namespace ZZZTouchLauncher
                 return null;
             }
 
-            Console.WriteLine("Steam 启动请求已提交，等待游戏进程出现；关闭此控制台将恢复 PC 配置。");
-            while (!restoreScope.CloseRequested)
+            Console.WriteLine("Steam 启动请求已提交，等待游戏进程出现；关闭此控制台将放弃等待。");
+            while (!closeScope.CloseRequested)
             {
                 Process game = FindRunningGame();
                 if (game != null)
@@ -378,46 +350,18 @@ namespace ZZZTouchLauncher
             return null;
         }
 
-        private static Process FindRunningGame()
+        private static Process FindRunningGame(bool warnOnMultiple = true)
         {
             Process[] processes = Process.GetProcessesByName(GameProcessName);
             if (processes.Length > 1)
             {
-                Console.WriteLine(
-                    $"警告：检测到 {processes.Length} 个游戏进程，仅处理第一个（多开场景不完整支持）。");
+                if (warnOnMultiple)
+                {
+                    Console.WriteLine(
+                        $"警告：检测到 {processes.Length} 个游戏进程，仅处理第一个（多开场景不完整支持）。");
+                }
             }
             return processes.Length > 0 ? processes[0] : null;
-        }
-
-        // 等待游戏主窗口客户区就绪（宽高均 > 0）。
-        // 游戏初次读取 GENERAL_DATA.bin 发生在客户区真正显示之后，
-        // 写回 PC 必须等到这一刻之后，否则游戏会读到 PC 配置、触屏不生效。
-        private static bool WaitForClientArea(uint pid, int timeoutMs)
-        {
-            int deadline = Environment.TickCount + timeoutMs;
-            while (Environment.TickCount < deadline)
-            {
-                IntPtr hwnd = IntPtr.Zero;
-                EnumWindows(delegate (IntPtr h, IntPtr l)
-                {
-                    GetWindowThreadProcessId(h, out uint windowPid);
-                    if (windowPid == pid && IsWindowVisible(h))
-                    {
-                        hwnd = h;
-                        return false;
-                    }
-                    return true;
-                }, IntPtr.Zero);
-
-                if (hwnd != IntPtr.Zero &&
-                    GetClientRect(hwnd, out RECT rect) &&
-                    rect.Width > 0 && rect.Height > 0)
-                {
-                    return true;
-                }
-                Thread.Sleep(500);
-            }
-            return false;
         }
 
         // 轮询等待用户启动游戏进程，记录其可执行文件所在目录到 config.json。
@@ -450,78 +394,6 @@ namespace ZZZTouchLauncher
             WriteConfig(config);
             Console.WriteLine($"已记录游戏路径：{gamePath}");
             return gamePath;
-        }
-
-        private static int GetCurrentPlatform(string raw)
-        {
-            var match = Regex.Match(raw, "LocalUILayoutPlatform\"\\s*:\\s*(\\d+)");
-            if (match.Success && int.TryParse(match.Groups[1].Value, out int mode))
-            {
-                return mode == 1 ? PlatformTouch : PlatformPc;
-            }
-            return PlatformPc;
-        }
-
-        private static string SetPlatform(string raw, int platform)
-        {
-            return Regex.Replace(
-                raw,
-                "(LocalUILayoutPlatform\")(\\s*:\\s*)(-?\\d+)",
-                m => m.Groups[1].Value + m.Groups[2].Value + platform);
-        }
-
-        private static int ReadPlatform(string dataPath)
-        {
-            string raw = Sleepy.ReadString(dataPath, Magic);
-            return GetCurrentPlatform(raw);
-        }
-
-        private static void WritePlatform(string dataPath, int platform)
-        {
-            string raw = Sleepy.ReadString(dataPath, Magic);
-            raw = SetPlatform(raw, platform);
-            Sleepy.WriteString(dataPath, raw, Magic);
-        }
-
-        private static bool TryWritePc(string dataPath, string failurePrefix)
-        {
-            try
-            {
-                WritePlatform(dataPath, PlatformPc);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(failurePrefix + ex.Message);
-                return false;
-            }
-        }
-
-        // 显式恢复入口：供 Sunshine Undo 或手工调用，把磁盘配置恢复为 PC 模式。
-        private static int RestorePcConfiguration()
-        {
-            LauncherConfig config = ReadConfig();
-            string gamePath = config.GamePath;
-            if (string.IsNullOrEmpty(gamePath))
-            {
-                Console.WriteLine("恢复 PC 配置失败：config.json 未记录游戏路径。");
-                return 1;
-            }
-
-            string dataPath = GeneralDataPath(gamePath);
-            if (!File.Exists(dataPath))
-            {
-                Console.WriteLine("恢复 PC 配置失败：配置文件不存在：" + dataPath);
-                return 1;
-            }
-
-            if (!TryWritePc(dataPath, "恢复 PC 配置失败："))
-            {
-                return 1;
-            }
-
-            Console.WriteLine("已恢复 PC 配置（LocalUILayoutPlatform=2）：" + dataPath);
-            return 0;
         }
 
         private static string DescribeInjectResult(int result)
@@ -644,23 +516,9 @@ namespace ZZZTouchLauncher
             }
         }
 
-        // Controller 内部模式：持有 Runtime/Hook，完成注入、配置切换和游戏退出后的收尾。
+        // Controller 内部模式：持有 Runtime/Hook，完成注入和游戏退出后的收尾。
         private static int RunController(uint initialPid)
         {
-            LauncherConfig config = ReadConfig();
-            if (string.IsNullOrEmpty(config.GamePath))
-            {
-                Console.WriteLine("Controller 启动失败：config.json 未记录游戏路径。");
-                return 1;
-            }
-
-            string dataPath = GeneralDataPath(config.GamePath);
-            if (!File.Exists(dataPath))
-            {
-                Console.WriteLine("Controller 启动失败：配置文件不存在：" + dataPath);
-                return 1;
-            }
-
             Process game;
             if (!TryGetGameProcess(initialPid, out game))
             {
@@ -699,40 +557,74 @@ namespace ZZZTouchLauncher
             if (injectResult != 0)
             {
                 Console.WriteLine($"Controller 注入失败：{DescribeInjectResult(injectResult)}");
-                // 保持触屏配置：游戏可能已读入触屏且仍在运行，重跑启动器会重新走接管分支。
                 ZZZTouchRelease();
                 return 1;
             }
 
-            // 客户区未就绪时不能写回 PC；保持触屏配置，等待游戏退出后再尝试恢复。
-            if (!WaitForClientArea(targetPid, 120000))
-            {
-                int waitTimeout = ZZZTouchWaitGameExit(uint.MaxValue);
-                if (waitTimeout == 0)
-                {
-                    TryWritePc(dataPath, "确保 PC 配置失败：");
-                }
-                ZZZTouchRelease();
-                return 0;
-            }
-
-            // 客户区就绪后再等 5 秒，确保游戏已完成初次配置读取，再写回 PC。
-            // 此时游戏运行态已经是触屏，磁盘配置可以恢复为 PC。
-            Thread.Sleep(5000);
-            TryWritePc(dataPath, "写回 PC 配置失败：");
-
-            // Controller 继续持有 Hook，直到游戏退出；退出后再次确保 PC 配置，再释放 Runtime。
-            int wait = ZZZTouchWaitGameExit(uint.MaxValue);
-            if (wait == 0)
-            {
-                TryWritePc(dataPath, "确保 PC 配置失败：");
-            }
-
+            // Controller 继续持有 Hook，直到游戏退出；Runtime 在游戏进程内固定触屏布局，
+            // 没有磁盘配置需要收尾。
+            ZZZTouchWaitGameExit(uint.MaxValue);
             ZZZTouchRelease();
             return 0;
         }
 
-        // 默认 orchestrator：只负责配置/进程编排，启动 Controller 后立即退出。
+        // 等进程模式：不启动游戏，等用户自行启动游戏进程，出现后立即启动 Controller。
+        // 触屏布局必须在游戏界面建好之前固定，所以轮询间隔很短；已在运行的游戏不接管。
+        private static int RunWaitMode()
+        {
+            LauncherConfig config = ReadConfig();
+
+            Process existing = FindRunningGame();
+            if (existing != null)
+            {
+                int runningPid = existing.Id;
+                existing.Dispose();
+                Console.WriteLine(
+                    "游戏已在运行（PID=" + runningPid + "），不支持中途注入：触屏布局必须在游戏启动前注入。");
+                Console.WriteLine("请先退出游戏，再重新运行启动器并等待游戏启动。");
+                return 1;
+            }
+
+            Console.WriteLine($"等进程模式：等待 {GameProcessName} 启动（关闭此控制台或按 Ctrl+C 取消）...");
+            ConsoleCloseScope closeScope;
+            try
+            {
+                closeScope = new ConsoleCloseScope();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("无法注册控制台关闭处理器：" + ex.Message);
+                return 1;
+            }
+
+            using (closeScope)
+            {
+                while (!closeScope.CloseRequested)
+                {
+                    Process game = FindRunningGame(false);
+                    if (game != null)
+                    {
+                        try
+                        {
+                            Console.WriteLine($"检测到游戏进程（PID={game.Id}），立即注入。");
+                            return StartController(
+                                (uint)game.Id,
+                                config.ControllerBreakaway) ? 0 : 1;
+                        }
+                        finally
+                        {
+                            game.Dispose();
+                        }
+                    }
+                    Thread.Sleep(WaitPollIntervalMs);
+                }
+            }
+
+            Console.WriteLine("已取消等待。");
+            return 1;
+        }
+
+        // 默认 orchestrator：只负责进程编排，启动 Controller 后立即退出。
         private static int RunLauncher(string[] gameArguments)
         {
             LauncherConfig config = ReadConfig();
@@ -740,7 +632,6 @@ namespace ZZZTouchLauncher
             string gamePath = config.GamePath;
             bool recordedGamePath = false;
 
-            string dataPath = null;
             string exePath = null;
             while (true)
             {
@@ -756,12 +647,11 @@ namespace ZZZTouchLauncher
                     recordedGamePath = true;
                 }
 
-                dataPath = GeneralDataPath(gamePath);
                 exePath = Path.Combine(gamePath, GameExecutableName);
-                if (!File.Exists(dataPath) || !File.Exists(exePath))
+                if (!File.Exists(exePath))
                 {
                     Console.WriteLine(
-                        $"游戏路径无效：{gamePath}（配置缺失或可执行文件不存在）");
+                        $"游戏路径无效：{gamePath}（可执行文件不存在）");
                     Console.WriteLine($"请手动启动 {GameExecutableName}，启动器将重新记录路径...");
                     gamePath = WaitForGameAndRecordPath(config);
                     if (gamePath == null)
@@ -775,84 +665,45 @@ namespace ZZZTouchLauncher
             }
 
             Process running = FindRunningGame();
-            if (running != null && gameArguments.Length > 0)
+            if (running != null)
             {
+                // 不支持中途注入：界面在游戏启动时就按启动那一刻的布局建好了，
+                // 中途才固定「当前布局平台」不会让已建好的界面切换，所以不接管。
+                int runningPid = running.Id;
+                running.Dispose();
+                if (recordedGamePath)
+                {
+                    Console.WriteLine(
+                        "游戏路径已记录。游戏正在运行（PID=" + runningPid + "），本次不注入；");
+                    Console.WriteLine("请退出游戏后重新运行启动器。");
+                    return 0;
+                }
+
                 Console.WriteLine(
-                    $"警告：游戏已在运行，无法透传 {gameArguments.Length} 个启动参数。");
-            }
-
-            // 接管分支：不修改已有配置；仅在游戏已是触屏模式时启动 Controller。
-            if (running != null && !recordedGamePath)
-            {
-                try
-                {
-                    int platform;
-                    try
-                    {
-                        platform = ReadPlatform(dataPath);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine("读取配置失败：" + ex.Message);
-                        return 1;
-                    }
-
-                    if (platform != PlatformTouch)
-                    {
-                        Console.WriteLine(
-                            $"游戏已启动且配置为 PC 模式（LocalUILayoutPlatform={platform}）。");
-                        Console.WriteLine("不注入、不修改配置，启动器退出。");
-                        return 0;
-                    }
-
-                    Console.WriteLine("游戏已启动且为触屏模式，启动后台 Controller 接管...");
-                    return StartController(
-                        (uint)running.Id,
-                        config.ControllerBreakaway) ? 0 : 1;
-                }
-                finally
-                {
-                    running.Dispose();
-                }
-            }
-
-            // 启动分支或首次路径自愈分支：确保触屏 → 启动/接管游戏 → 启动 Controller。
-            // 注入、客户区等待、写回 PC 和游戏退出后的收尾由 Controller 完成。
-            Console.WriteLine("确保触屏模式...");
-            try
-            {
-                WritePlatform(dataPath, PlatformTouch);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("写入触屏配置失败：" + ex.Message);
-                if (running != null)
-                {
-                    running.Dispose();
-                }
+                    "游戏已在运行（PID=" + runningPid + "），不支持中途注入：触屏布局必须在游戏启动前注入。");
+                Console.WriteLine("请先退出游戏，再用启动器启动。");
                 return 1;
             }
 
-            Process started = running;
-            ConsoleCloseRestoreScope steamRestoreScope = null;
+            // 启动游戏 → 启动 Controller。
+            Process started = null;
+            ConsoleCloseScope steamCloseScope = null;
             try
             {
-                if (started == null)
                 {
                     if (HasSteamAppId(gamePath))
                     {
                         try
                         {
-                            steamRestoreScope = new ConsoleCloseRestoreScope(dataPath);
+                            steamCloseScope = new ConsoleCloseScope();
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine("无法注册控制台关闭恢复处理器：" + ex.Message);
-                            TryWritePc(dataPath, "恢复 PC 配置失败：");
+                            Console.WriteLine("无法注册控制台关闭处理器：" + ex.Message);
                             return 1;
                         }
 
-                        started = StartSteamGame(gameArguments, steamRestoreScope);
+                        started = StartSteamGame(gameArguments, steamCloseScope);
                     }
                     else
                     {
@@ -877,30 +728,17 @@ namespace ZZZTouchLauncher
                     if (started == null)
                     {
                         Console.WriteLine("游戏启动失败");
-                        // 启动请求明确失败或控制台关闭；恢复操作是幂等的。
-                        TryWritePc(dataPath, "恢复 PC 配置失败：");
                         return 1;
                     }
 
                     Console.WriteLine($"游戏进程已启动（PID={started.Id}）。");
-                }
-                else
-                {
-                    Console.WriteLine($"已获取游戏路径并更新触屏配置（PID={started.Id}）。");
                 }
 
                 if (!StartController(
                     (uint)started.Id,
                     config.ControllerBreakaway))
                 {
-                    // Controller 创建失败时没有接管者，恢复 PC 配置。
-                    TryWritePc(dataPath, "恢复 PC 配置失败：");
                     return 1;
-                }
-
-                if (steamRestoreScope != null)
-                {
-                    steamRestoreScope.Complete();
                 }
             }
             finally
@@ -909,9 +747,9 @@ namespace ZZZTouchLauncher
                 {
                     started.Dispose();
                 }
-                if (steamRestoreScope != null)
+                if (steamCloseScope != null)
                 {
-                    steamRestoreScope.Dispose();
+                    steamCloseScope.Dispose();
                 }
             }
 
@@ -939,20 +777,21 @@ namespace ZZZTouchLauncher
 
             Console.WriteLine("=== ZZZTouchLauncher ===");
 
-            if (args.Length == 1 && args[0] == "--restore-pc")
-            {
-                return RestorePcConfiguration();
-            }
-
             foreach (string argument in args)
             {
-                if (argument == "--restore-pc" || argument == InternalControllerArgument)
+                if (argument == InternalControllerArgument ||
+                    (argument == WaitArgument && args.Length != 1))
                 {
                     Console.WriteLine("用法：");
-                    Console.WriteLine("  ZZZTouchLauncher.exe [游戏参数...]");
-                    Console.WriteLine("  ZZZTouchLauncher.exe --restore-pc");
+                    Console.WriteLine("  ZZZTouchLauncher.exe [游戏参数...]    启动游戏并注入");
+                    Console.WriteLine("  ZZZTouchLauncher.exe --wait           等待游戏进程启动后注入（不能与游戏参数组合）");
                     return 2;
                 }
+            }
+
+            if (args.Length == 1 && args[0] == WaitArgument)
+            {
+                return RunWaitMode();
             }
 
             return RunLauncher(args);

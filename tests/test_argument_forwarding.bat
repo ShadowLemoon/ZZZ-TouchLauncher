@@ -27,7 +27,7 @@ if not exist "%GAME%" mkdir "%GAME%"
   /reference:System.Runtime.Serialization.dll ^
   /reference:System.Xml.dll ^
   /out:"%BUILD%\ZZZTouchLauncher.exe" ^
-  ..\Program.cs ..\Sleepy.cs ..\Properties\AssemblyInfo.cs
+  ..\Program.cs ..\Properties\AssemblyInfo.cs
 if errorlevel 1 (
   echo FAIL: could not compile ZZZTouchLauncher
   exit /b 1
@@ -44,7 +44,7 @@ if errorlevel 1 (
   /main:ZZZTouchLauncher.ArgumentForwardSmoke ^
   /reference:System.Runtime.Serialization.dll ^
   /reference:System.Xml.dll ^
-  /out:"%BUILD%\ArgumentForwardSmoke.exe" ArgumentForwardSmoke.cs ..\Sleepy.cs ..\Program.cs
+  /out:"%BUILD%\ArgumentForwardSmoke.exe" ArgumentForwardSmoke.cs ..\Program.cs
 if errorlevel 1 (
   echo FAIL: could not compile ArgumentForwardSmoke
   exit /b 1

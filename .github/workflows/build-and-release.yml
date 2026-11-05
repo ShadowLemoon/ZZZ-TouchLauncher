@@ -22,9 +22,6 @@ jobs:
       - name: Build Launcher
         run: msbuild ZZZTouchLauncher.csproj /t:Rebuild /p:Configuration=Release /p:Platform=AnyCPU
 
-      - name: Test legacy config restore
-        run: tests\test_restore_pc.bat
-
       - name: Test game argument forwarding
         run: tests\test_argument_forwarding.bat
 

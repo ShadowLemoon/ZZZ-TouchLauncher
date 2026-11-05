@@ -8,12 +8,6 @@ namespace ZZZTouchLauncher
 {
     internal static class ArgumentForwardSmoke
     {
-        private static readonly byte[] Magic = new byte[]
-        {
-            85, 110, 209, 150, 116, 209, 131, 206, 149, 110, 103, 105, 110, 208, 181,
-            46, 71, 208, 176, 109, 101, 206, 159, 98, 106, 101, 209, 129, 116
-        };
-
         private static int Main(string[] args)
         {
             if (args.Length != 2)
@@ -60,15 +54,6 @@ namespace ZZZTouchLauncher
                 Console.WriteLine("FAIL: launcher or argument echo game is missing");
                 return 1;
             }
-
-            string dataPath = Path.Combine(
-                gameDirectory,
-                "ZenlessZoneZero_Data",
-                "Persistent",
-                "LocalStorage",
-                "GENERAL_DATA.bin");
-            Directory.CreateDirectory(Path.GetDirectoryName(dataPath));
-            Sleepy.WriteString(dataPath, "{\"LocalUILayoutPlatform\":2}", Magic);
 
             string escapedGamePath = gameDirectory.Replace("\\", "\\\\");
             File.WriteAllText(
@@ -162,20 +147,18 @@ namespace ZZZTouchLauncher
             }
             File.Delete(steamAppIdPath);
 
-            Sleepy.WriteString(dataPath, "{\"LocalUILayoutPlatform\":1}", Magic);
-            using (var restoreScope = new Program.ConsoleCloseRestoreScope(dataPath))
+            using (var closeScope = new Program.ConsoleCloseScope())
             {
-                if (restoreScope.HandleConsoleControl(2))
+                if (closeScope.HandleConsoleControl(2))
                 {
                     Console.WriteLine("FAIL: console close handler suppressed normal termination");
                     return 1;
                 }
-            }
-            string restored = Sleepy.ReadString(dataPath, Magic);
-            if (!restored.Contains("\"LocalUILayoutPlatform\":2"))
-            {
-                Console.WriteLine("FAIL: console close handler did not restore PC mode");
-                return 1;
+                if (!closeScope.CloseRequested)
+                {
+                    Console.WriteLine("FAIL: console close was not recorded");
+                    return 1;
+                }
             }
 
             Console.WriteLine("ArgumentForwardSmoke=ok");
